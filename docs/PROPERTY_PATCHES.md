@@ -4,30 +4,18 @@
 
 ## 配置
 
-新功能默认关闭。由具有 Android 属性写权限的控制程序设置 `chromium.enable=1` 后启用；普通第三方 App、adb shell 在 user ROM 上可能无权写入，renderer 的属性读取也受 SELinux 控制。构建签名不会赋予这些权限；必须在目标 ROM 实测。未设置、空值或 `-` 保持 Chromium 默认（X-Requested-With 的空值例外）。修改配置后重启宿主 App 并重新加载页面；UA-CH 为对象/导航快照。
+本版本已取消系统属性读取。使用宿主 App 的 `Fingerprint.configure(json)` 统一入口，调用必须早于 WebView 启动；完整格式和生命周期见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。以下字段均放在 `settings` 对象内，不带 `chromium.` 前缀。数字 / 布尔值使用 JSON 原生类型。未知字段、类型错误或越界使整份配置失败，旧配置保持不变。
 
-```sh
-# 在具有属性写权限的设备 shell 中执行
-setprop chromium.navigator.hardwareConcurrency 8
-setprop chromium.navigator.deviceMemory 8
-setprop chromium.screen.width 1080
-setprop chromium.screen.height 1920
-setprop chromium.config.x_requested_with com.example.app
-setprop chromium.enable 1
-# 全局关闭本次迁移新增功能
-setprop chromium.enable 0
-```
-
-| 属性（均以 chromium. 开头） | 用途及格式 |
+| settings 字段 | 用途及格式 |
 | --- | --- |
-| config.x_requested_with | 未设置或 `-`：原生包名策略；非空：强制替换；显式空字符串：删除，示例 `setprop chromium.config.x_requested_with ''` |
-| network.proxy | 新增进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。非法非空配置阻断代理请求，修改后重启 App，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
-| navigator.useragent / useragent2 / useragent3 | 按顺序拼接 HTTP / JS UA，首段必须非空；拒绝控制字符。每段受 Android 属性长度限制 |
-| navigator.userAgentMeta.brands / fullVersionList | `Chromium,158&Android WebView,158` 格式，完整版本单独配置，拒绝不完整条目 |
-| navigator.userAgentMeta.mobile / wow64 | 0/1 或 false/true |
+| config.x_requested_with | 未设置：原生包名策略；非空合法字符串：替换；空字符串：删除 |
+| network.proxy | 进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。入口拒绝非法 URI，修改需重启宿主进程，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
+| navigator.useragent | 完整 HTTP / JS UA 字符串，最多 4096 字节；拒绝非法控制字符。不再分段 |
+| navigator.userAgentMeta.brands / fullVersionList | `[{"brand":"Chromium","version":"158"}]` 数组；完整版本列表单独配置 |
+| navigator.userAgentMeta.mobile / wow64 | JSON 布尔值 true/false |
 | navigator.userAgentMeta.platform / platformVersion / architecture / model / fullVersion / bitness | UA-CH 字段，要求可序列化的 ASCII；保留高熵提示权限策略与按需发送规则 |
 | navigator.productSub / vendor / platform | JS Navigator 字符串，含继承自 NavigatorID 的字段 |
-| navigator.cookieEnabled | 0/1 或 false/true；仅报告值，不改变 Cookie 权限和存储 |
+| navigator.cookieEnabled | JSON 布尔值 true/false；仅报告值，不改变 Cookie 权限和存储 |
 | navigator.hardwareConcurrency | 整数 1..1024 |
 | navigator.deviceMemory | 有限数 0.125..1024（GiB 的报告值） |
 | navigator.maxTouchPoints | 整数 0..100 |
@@ -37,7 +25,7 @@ setprop chromium.enable 0
 | window.devicePixelRatio | 有限数 0.01..100；报告值，不改变硬件分辨率 |
 | screen.width / height / availWidth / availHeight | 整数 0..100000 |
 | screen.colorDepth | 整数 1..128，pixelDepth 跟随 |
-| navigator.battery.charging | 0/1 或 false/true |
+| navigator.battery.charging | JSON 布尔值 true/false |
 | navigator.battery.chargingTime / dischargingTime | 有限秒数 0..1e15 |
 | navigator.battery.level | 有限数 0..1 |
 | navigator.bluetooth | false/0 时 getter 返回 null；true 不强制打开原本不可用的 API |
@@ -51,9 +39,9 @@ setprop chromium.enable 0
 | webgl.unmasked_vendor / unmasked_renderer | 仅修改 WEBGL_debug_renderer_info 解锁后的字符串；保留扩展及 context-lost 检查，不改变真实 GPU |
 | canvas.toDataUrl.randomDouble | 有限配置数，0 关闭；通过 seed 位混合选择起点，扫描实际像素寻找不透明的 8-bit RGBA/BGRA 像素，仅找到时复制并翻转一个颜色位后编码。跳过行填充；无候选像素不分配副本。保持原画布及编码格式；不影响 toBlob/getImageData |
 
-数值解析失败、越界或 NaN/Infinity 会回退原值，不输出逐次 WARNING 日志。各项仅改变暴露的值或文中所述数据；不绕过 API 可用性、权限、安全上下文或宿主设置。
+配置入口拒绝数值类型错误、越界及非有限值，整份失败不改变旧配置。各项仅改变暴露的值或文中所述数据；不绕过 API 可用性、权限、安全上下文或宿主设置。
 
-此前 `CanvasFillRectNoise` 独立于 `chromium.enable`，仍保持原来的默认开关。Android user ROM 不保证读取 `/data/local/tmp/webview-command-line`，不能依靠该文件停用它。
+新增 `canvas.fillRectNoise` 布尔项；默认关闭，仅在统一配置 enabled=true 且该项=true 时开启原 fillRect 噪声。
 
 ## 原补丁处理
 
@@ -69,16 +57,16 @@ setprop chromium.enable 0
 
 ## 验证
 
-`python3 webview_custom/test_properties.py` 编译生产实现、实际请求头策略函数和测试边界适配器，覆盖属性解析、请求头操作、UA、brands、ICE/SDP、音频与像素索引，并启用 AddressSanitizer/UndefinedBehaviorSanitizer。
+`python3 webview_custom/test_properties.py` 编译生产 getter、实际请求头策略函数和配置存储边界适配器，覆盖属性解析、请求头操作、UA、brands、ICE/SDP、音频与像素索引，并启用 AddressSanitizer/UndefinedBehaviorSanitizer。
 
-`python3 webview_custom/test_review_regressions.py` 执行实际生产方法体的 9 个回归用例；仅模拟 Bionic 属性服务、容器和编码器边界，不模拟方法实现。测试不验证 PNG 编码器本身或 V8 行为；APK 构建检查实际 Android 类型、编译和链接。现有 `test_noise.py` 验证 81 种 fillRect 偏移。
+`python3 webview_custom/test_review_regressions.py` 执行实际生产方法体的 9 个回归用例；仅模拟配置存储、容器和编码器边界，不模拟方法实现。测试不验证 PNG 编码器本身或 V8 行为；APK 构建检查实际 Android 类型、编译和链接。现有 `test_noise.py` 验证 81 种 fillRect 偏移。
 
-主机测试不能代替 RK14 的属性权限、真实网络和页面测试。
+实际 JSON 存储测试见 UNIFIED_CONFIG.md；主机测试不能代替 RK14 的宿主调用、真实网络和页面测试。
 
 ## 代码质量修复
 
 - WebView 专用配置实现移到 Blink common，移除 base 中的产品策略和大段内联代码；Bionic 头文件保留在实现文件。
-- 每次操作只读取一次主开关；UA-CH 在浏览器侧创建元数据时处理，renderer setter 和公共序列化保持原生行为。
+- 每次操作捕获同一份不可变配置快照；UA-CH 在浏览器侧创建元数据时处理，renderer setter 和公共序列化保持原生行为。
 - AndroidX 自定义 UA 元数据与默认元数据使用同一校验；非法 ASCII 值回退原值。
 - 内部音频访问不触发噪声；JavaScript 两种读取接口仍共享一次处理后的数据，Zero 重置处理状态。
 - ICE 仅处理 candidate 前缀和规范 IPv4，保留原有空白、端口及扩展；不修改不符合结构的输入。

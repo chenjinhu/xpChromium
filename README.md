@@ -6,8 +6,8 @@
 | --- | --- |
 | Chromium 版本 | `158.0.8109.0` |
 | 官方基线 | `51b3c21991199bc9531e7d296056dd9351554c0c` |
-| 自定义源码提交 | `1598a163cff1c3ed23c6406f8bcdded6cd4c06ea` |
-| 自定义提交数 | 10 |
+| 自定义源码提交 | `bf95d218bcae6441438511bea18b89c4aa2ad4a2` |
+| 自定义提交数 | 11 |
 | 构建目标 | `system_webview_64_apk` |
 | APK 包名 | `com.android.webview` |
 
@@ -17,11 +17,12 @@
 
 - [系统属性配置、26 个旧补丁的迁移及质量修复](docs/PROPERTY_PATCHES.md)
 - [真实代理、WebRTC 路由和网络身份配置](docs/NETWORK_POLICY.md)
+- [统一指纹配置 API、字段类型和生命周期](docs/UNIFIED_CONFIG.md)
 - [Window、Canvas fillRect 和桌面定制说明](docs/ORIGINAL_PATCH_NOTES.md)
 - [构建、回归和签名验证记录](docs/VERIFICATION.md)
 - [WebView 编译参数](config/webview-arm64.gn)
 
-系统属性功能由 `chromium.enable=1` 启用。`chromium.config.x_requested_with` 未配置或为 `-` 时使用原生策略，非空合法值强制替换，显式空值删除请求头。此前的 `CanvasFillRectNoise` 独立于此总开关，默认开启。完整行为以配置说明为准。
+本版本使用宿主 App 的 JSON 统一入口，已经取消 `chromium.*` 系统属性读取。将 [Fingerprint.java](sdk/Fingerprint.java) 集成到宿主 App，在 WebView 启动前调用 `Fingerprint.configure(json)`；完整接入说明见 [UNIFIED_CONFIG.md](docs/UNIFIED_CONFIG.md)，最小示例见 [examples/fingerprint.json](examples/fingerprint.json)。默认关闭迁移的字段覆盖、代理和 Canvas 扰动。统一配置被冻结后需重启宿主进程才能改变；当前仍是进程级作用范围。
 
 ## 在现有服务器继续开发
 

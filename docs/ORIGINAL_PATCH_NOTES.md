@@ -1,3 +1,7 @@
+# 统一指纹配置版本
+
+本版本使用宿主 App 的 JSON 统一入口，已取消 Android 系统属性读取。接入代码、字段、生命周期及 SOCKS5 用法见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。默认不启用字段覆盖、代理或 Canvas 扰动；旧 Window IDL 定制保留。以下为早期迁移记录，其中旧的默认噪声行为已由统一入口取代。
+
 # Chromium WebView 自定义补丁
 
 - 上游基线：`51b3c21991199bc9531e7d296056dd9351554c0c`，版本 `158.0.8109.0`。

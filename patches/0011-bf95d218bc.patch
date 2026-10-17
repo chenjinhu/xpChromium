@@ -1,0 +1,1368 @@
+From bf95d218bcae6441438511bea18b89c4aa2ad4a2 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sat, 17 Oct 2026 21:54:08 +0800
+Subject: [PATCH] Replace Android property fingerprint input with a unified
+ host JSON API
+
+
+diff --git a/android_webview/BUILD.gn b/android_webview/BUILD.gn
+index da72aa53101f7511084c5d240428f6ca9bfe13a2..b8123fad6b751faec9377caa0cbe2b2e7899efbe 100644
+--- a/android_webview/BUILD.gn
++++ b/android_webview/BUILD.gn
+@@ -295,6 +295,7 @@ if (_is_default_toolchain) {
+       "java/src/org/chromium/android_webview/AwDevToolsServer.java",
+       "java/src/org/chromium/android_webview/AwDisplayCutoutController.java",
+       "java/src/org/chromium/android_webview/AwDisplayModeController.java",
++      "java/src/org/chromium/android_webview/AwFingerprintConfig.java",
+       "java/src/org/chromium/android_webview/AwGeolocationPermissions.java",
+       "java/src/org/chromium/android_webview/AwHistogramRecorder.java",
+       "java/src/org/chromium/android_webview/AwHttpAuthHandler.java",
+@@ -1041,6 +1042,7 @@ generate_jni("browser_jni_headers") {
+     "java/src/org/chromium/android_webview/AwCrashyClassUtils.java",
+     "java/src/org/chromium/android_webview/AwDarkMode.java",
+     "java/src/org/chromium/android_webview/AwDevToolsServer.java",
++    "java/src/org/chromium/android_webview/AwFingerprintConfig.java",
+     "java/src/org/chromium/android_webview/AwHttpAuthHandler.java",
+     "java/src/org/chromium/android_webview/AwHttpCacheManager.java",
+     "java/src/org/chromium/android_webview/AwInterfaceRegistrar.java",
+diff --git a/android_webview/browser/BUILD.gn b/android_webview/browser/BUILD.gn
+index aad3bdddfaa852fdb900ed99edcf8ca0f24028ea..9fa3d36c1c096ac4cce189a25ae4c8fcfc67cbe6 100644
+--- a/android_webview/browser/BUILD.gn
++++ b/android_webview/browser/BUILD.gn
+@@ -129,6 +129,7 @@ source_set("browser") {
+     "aw_quota_manager_bridge.h",
+     "aw_render_process_gone_delegate.h",
+     "aw_renderer_priority.h",
++    "aw_fingerprint_config.cc",
+     "aw_settings.cc",
+     "aw_settings.h",
+     "aw_speech_recognition_manager_delegate.cc",
+diff --git a/android_webview/browser/aw_browser_main_parts.cc b/android_webview/browser/aw_browser_main_parts.cc
+index 7a9d66a9dc540a5534c091fd107275259e2be6a6..a74ee39939a443c6666cb93f8612bd7042dd0b24 100644
+--- a/android_webview/browser/aw_browser_main_parts.cc
++++ b/android_webview/browser/aw_browser_main_parts.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "android_webview/browser/aw_browser_main_parts.h"
+ 
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
++
+ #include <memory>
+ #include <set>
+ #include <string>
+@@ -190,6 +192,7 @@ void AwBrowserMainParts::PreCreateMainMessageLoop() {
+ }
+ 
+ int AwBrowserMainParts::PreEarlyInitialization() {
++  blink::FreezeWebViewFingerprint();
+   // Network change notifier factory must be singleton, only set factory
+   // instance while it is not been created.
+   // In most cases, this check is not necessary because SetFactory should be
+diff --git a/android_webview/browser/aw_content_browser_client.cc b/android_webview/browser/aw_content_browser_client.cc
+index f219741fdf7072879d765d8238a3b723a83bb698..e67b854d051ce35eeee146875b343fd43b713633 100644
+--- a/android_webview/browser/aw_content_browser_client.cc
++++ b/android_webview/browser/aw_content_browser_client.cc
+@@ -58,6 +58,7 @@
+ #include "base/android/yield_to_looper_checker.h"
+ #include "base/base_paths_android.h"
+ #include "base/base_switches.h"
++#include "base/base64.h"
+ #include "base/check_deref.h"
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+@@ -156,6 +157,7 @@
+ #include "third_party/blink/public/common/loader/url_loader_throttle.h"
+ #include "third_party/blink/public/common/navigation/preloading_headers.h"
+ #include "third_party/blink/public/common/web_preferences/web_preferences.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
+ #include "third_party/blink/public/common/webview/property_overrides.h"
+ #include "ui/base/resource/resource_bundle.h"
+ #include "ui/base/resource/resource_bundle_android.h"
+@@ -502,6 +504,15 @@ bool AwContentBrowserClient::ForceSniffingFileUrlsForHtml() {
+ void AwContentBrowserClient::AppendExtraCommandLineSwitches(
+     base::CommandLine* command_line,
+     int child_process_id) {
++  // Include every renderer (including replacement/spare processes). Workers
++  // inherit its immutable process snapshot before any document is created.
++  if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
++      switches::kRendererProcess) {
++    blink::FreezeWebViewFingerprint();
++    command_line->AppendSwitchASCII(
++        blink::kWebViewFingerprintSwitch,
++        base::Base64Encode(blink::GetWebViewFingerprintConfig()->serialized));
++  }
+   if (!command_line->HasSwitch(switches::kSingleProcess)) {
+     // The only kind of a child process WebView can have is renderer or utility.
+     std::string process_type =
+diff --git a/android_webview/browser/aw_fingerprint_config.cc b/android_webview/browser/aw_fingerprint_config.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..324816ad08345cf8093ac4668e5e4e13775d8842
+--- /dev/null
++++ b/android_webview/browser/aw_fingerprint_config.cc
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <string>
++
++#include "base/android/jni_string.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
++#include "third_party/jni_zero/default_conversions.h"
++
++// Must come after the JNI conversion specializations.
++#include "android_webview/browser_jni_headers/AwFingerprintConfig_jni.h"
++
++namespace android_webview {
++static std::string JNI_AwFingerprintConfig_Configure(JNIEnv* env,
++                                                     const std::string& json) {
++  return blink::ConfigureWebViewFingerprint(json);
++}
++}  // namespace android_webview
++
++DEFINE_JNI(AwFingerprintConfig)
+diff --git a/android_webview/browser/network_service/aw_network_property_policy.cc b/android_webview/browser/network_service/aw_network_property_policy.cc
+index 46a4eb482b1d4d3a44d203ac0c1ed56b67af8c0e..5669546d207b9de653fda2f697d16f2eab905e7f 100644
+--- a/android_webview/browser/network_service/aw_network_property_policy.cc
++++ b/android_webview/browser/network_service/aw_network_property_policy.cc
+@@ -15,6 +15,7 @@
+ namespace android_webview {
+ 
+ const AwNetworkPropertyPolicy& AwNetworkPropertyPolicy::Get() {
++  blink::FreezeWebViewFingerprint();
+   static const base::NoDestructor<AwNetworkPropertyPolicy> policy(
+       blink::WebViewPropertyOverrides().NetworkProxy());
+   return *policy;
+diff --git a/android_webview/browser/network_service/aw_proxy_config_monitor.cc b/android_webview/browser/network_service/aw_proxy_config_monitor.cc
+index 21dd268ccf6d9cd845ee7405ead53115e7ea6bc7..cb9935410ae912d426365fea093b08d894162af7 100644
+--- a/android_webview/browser/network_service/aw_proxy_config_monitor.cc
++++ b/android_webview/browser/network_service/aw_proxy_config_monitor.cc
+@@ -91,8 +91,8 @@ void AwProxyConfigMonitor::AddProxyToNetworkContextParams(
+   const auto& policy = AwNetworkPropertyPolicy::Get();
+   if (policy.proxy_config()) {
+     if (!policy.proxy_is_valid()) {
+-      LOG(ERROR) << "Invalid chromium.network.proxy; proxy traffic is blocked. "
+-                    "Correct the property and restart the host app.";
++      LOG(ERROR) << "Invalid fingerprint network.proxy; proxy traffic is blocked. "
++                    "Correct the startup configuration and restart the host app.";
+     }
+     network_context_params->initial_proxy_config =
+         net::ProxyConfigWithAnnotation(*policy.proxy_config(),
+@@ -156,8 +156,8 @@ std::string AwProxyConfigMonitor::SetProxyOverride(
+     const bool reverse_bypass,
+     base::OnceClosure callback) {
+   if (AwNetworkPropertyPolicy::Get().proxy_config()) {
+-    return "A chromium.network.proxy startup override is active; clear the "
+-           "property and restart the host app before using ProxyController.";
++    return "A fingerprint network.proxy startup override is active; omit the "
++           "setting and restart the host app before using ProxyController.";
+   }
+   return proxy_config_service_android_->SetProxyOverride(
+       proxy_rules, bypass_rules, reverse_bypass,
+diff --git a/android_webview/glue/BUILD.gn b/android_webview/glue/BUILD.gn
+index bc4cf33725c5f5269d31e9e7041dad37b075ef3b..4f2cd2dfff57364ca0b57909d76d55d8659d885b 100644
+--- a/android_webview/glue/BUILD.gn
++++ b/android_webview/glue/BUILD.gn
+@@ -49,6 +49,7 @@ android_library("glue_java") {
+     "java/src/com/android/webview/chromium/DrawFunctor.java",
+     "java/src/com/android/webview/chromium/DrawGLFunctor.java",
+     "java/src/com/android/webview/chromium/FactoryStartupTimings.java",
++    "java/src/com/android/webview/chromium/FingerprintConfig.java",
+     "java/src/com/android/webview/chromium/GeolocationPermissionsAdapter.java",
+     "java/src/com/android/webview/chromium/GlueApiHelperForQ.java",
+     "java/src/com/android/webview/chromium/GlueApiHelperForR.java",
+diff --git a/android_webview/glue/java/src/com/android/webview/chromium/FingerprintConfig.java b/android_webview/glue/java/src/com/android/webview/chromium/FingerprintConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea6ba817c6de6a1795d88ecd3c54b781722266d5
+--- /dev/null
++++ b/android_webview/glue/java/src/com/android/webview/chromium/FingerprintConfig.java
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package com.android.webview.chromium;
++
++import org.chromium.android_webview.AwFingerprintConfig;
++import org.chromium.build.annotations.UsedByReflection;
++
++/** Host API, available through WebView.getWebViewClassLoader() before startup. */
++@UsedByReflection("xpChromium host application")
++public final class FingerprintConfig {
++    private FingerprintConfig() {}
++
++    /** Returns an empty string on success, or a validation/startup error. */
++    @UsedByReflection("xpChromium host application")
++    public static String configure(String json) {
++        if (json == null) return "Fingerprint JSON must not be null";
++        return AwFingerprintConfig.configure(json);
++    }
++}
+diff --git a/android_webview/java/src/org/chromium/android_webview/AwFingerprintConfig.java b/android_webview/java/src/org/chromium/android_webview/AwFingerprintConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b7af15627c58b006ae0562daff00079dc0587ca
+--- /dev/null
++++ b/android_webview/java/src/org/chromium/android_webview/AwFingerprintConfig.java
+@@ -0,0 +1,25 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package org.chromium.android_webview;
++
++import org.jni_zero.JNINamespace;
++import org.jni_zero.JniType;
++import org.jni_zero.NativeMethods;
++
++/** Native, process-scoped fingerprint configuration supplied by the host app. */
++@JNINamespace("android_webview")
++public final class AwFingerprintConfig {
++    private AwFingerprintConfig() {}
++
++    public static String configure(String json) {
++        return AwFingerprintConfigJni.get().configure(json);
++    }
++
++    @NativeMethods
++    interface Natives {
++        @JniType("std::string")
++        String configure(@JniType("std::string") String json);
++    }
++}
+diff --git a/android_webview/renderer/aw_content_renderer_client.cc b/android_webview/renderer/aw_content_renderer_client.cc
+index ce17a4e6f3c93d17373ae38f5b30f5e6c929c573..acf3e90389f93b8d7c2398bce232511ad8df2ac7 100644
+--- a/android_webview/renderer/aw_content_renderer_client.cc
++++ b/android_webview/renderer/aw_content_renderer_client.cc
+@@ -21,6 +21,8 @@
+ #include "android_webview/renderer/browser_exposed_renderer_interfaces.h"
+ #include "base/android/library_loader/library_prefetcher.h"
+ #include "base/command_line.h"
++#include "base/base64.h"
++#include "base/check.h"
+ #include "base/feature_list.h"
+ #include "base/i18n/rtl.h"
+ #include "base/strings/string_util.h"
+@@ -43,6 +45,7 @@
+ #include "content/public/renderer/render_thread.h"
+ #include "mojo/public/cpp/bindings/binder_map.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/web_runtime_features.h"
+ #include "third_party/blink/public/platform/web_string.h"
+@@ -69,6 +72,14 @@ AwContentRendererClient::AwContentRendererClient() = default;
+ AwContentRendererClient::~AwContentRendererClient() = default;
+ 
+ void AwContentRendererClient::RenderThreadStarted() {
++  const auto& command_line = *base::CommandLine::ForCurrentProcess();
++  if (command_line.HasSwitch(blink::kWebViewFingerprintSwitch)) {
++    std::string json;
++    CHECK(base::Base64Decode(
++        command_line.GetSwitchValueASCII(blink::kWebViewFingerprintSwitch), &json));
++    CHECK(blink::ConfigureWebViewFingerprint(json).empty());
++  }
++  blink::FreezeWebViewFingerprint();
+   RenderThread* thread = RenderThread::Get();
+   aw_render_thread_observer_ = std::make_unique<AwRenderThreadObserver>();
+   thread->AddObserver(aw_render_thread_observer_.get());
+diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
+index 26bc1a94913bda65affcb715d6fd3787c291f05a..fc8b411600b08d9b74a57e392c80fae2e250819f 100644
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -282,6 +282,7 @@ source_set("common") {
+     "webid/login_status_account.cc",
+     "webid/login_status_options.cc",
+     "webrtc/rtc_logging_mojom_traits.cc",
++    "webview/fingerprint_config.cc",
+     "webview/property_overrides.cc",
+     "widget/constants.cc",
+     "widget/device_emulation_params_mojom_traits.cc",
+diff --git a/third_party/blink/common/webview/fingerprint_config.cc b/third_party/blink/common/webview/fingerprint_config.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c2abd5758446e300b9ffe10c39454c215273d84
+--- /dev/null
++++ b/third_party/blink/common/webview/fingerprint_config.cc
+@@ -0,0 +1,301 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
++
++#include <algorithm>
++#include <cmath>
++#include <iterator>
++#include <utility>
++
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/synchronization/lock.h"
++#include "base/values.h"
++#include "url/gurl.h"
++
++namespace blink {
++namespace {
++constexpr size_t kMaxConfigBytes = 32768;
++enum class Kind {
++  kString,
++  kHeader,
++  kAscii,
++  kBool,
++  kInt,
++  kNumber,
++  kBrands,
++  kProxy,
++  kIPv4
++};
++struct Field {
++  std::string_view key;
++  Kind kind;
++  double minimum = 0;
++  double maximum = 0;
++};
++constexpr Field kFields[] = {
++    {"navigator.useragent", Kind::kHeader},
++    {"config.x_requested_with", Kind::kHeader},
++    {"network.proxy", Kind::kProxy},
++    {"navigator.hardwareConcurrency", Kind::kInt, 1, 1024},
++    {"navigator.deviceMemory", Kind::kNumber, 0.125, 1024},
++    {"navigator.maxTouchPoints", Kind::kInt, 0, 100},
++    {"navigator.cookieEnabled", Kind::kBool},
++    {"navigator.vendor", Kind::kString},
++    {"navigator.productSub", Kind::kString},
++    {"navigator.platform", Kind::kString},
++    {"navigator.userAgentMeta.brands", Kind::kBrands},
++    {"navigator.userAgentMeta.fullVersionList", Kind::kBrands},
++    {"navigator.userAgentMeta.mobile", Kind::kBool},
++    {"navigator.userAgentMeta.wow64", Kind::kBool},
++    {"navigator.userAgentMeta.platform", Kind::kAscii},
++    {"navigator.userAgentMeta.platformVersion", Kind::kAscii},
++    {"navigator.userAgentMeta.architecture", Kind::kAscii},
++    {"navigator.userAgentMeta.model", Kind::kAscii},
++    {"navigator.userAgentMeta.bitness", Kind::kAscii},
++    {"navigator.userAgentMeta.fullVersion", Kind::kAscii},
++    {"navigator.battery.charging", Kind::kBool},
++    {"navigator.battery.chargingTime", Kind::kNumber, 0, 1e15},
++    {"navigator.battery.dischargingTime", Kind::kNumber, 0, 1e15},
++    {"navigator.battery.level", Kind::kNumber, 0, 1},
++    {"navigator.bluetooth", Kind::kBool},
++    {"navigator.connection.type", Kind::kAscii},
++    {"navigator.connection.effectiveType", Kind::kAscii},
++    {"navigator.connection.downlinkMax", Kind::kNumber, 0, 1e9},
++    {"navigator.connection.downlink", Kind::kNumber, 0, 1e9},
++    {"navigator.connection.rtt", Kind::kInt, 0, 2147483647},
++    {"document.clientWidth", Kind::kInt, 0, 100000},
++    {"document.clientHeight", Kind::kInt, 0, 100000},
++    {"window.innerWidth", Kind::kInt, 0, 100000},
++    {"window.innerHeight", Kind::kInt, 0, 100000},
++    {"window.outerWidth", Kind::kInt, 0, 100000},
++    {"window.outerHeight", Kind::kInt, 0, 100000},
++    {"window.devicePixelRatio", Kind::kNumber, 0.01, 100},
++    {"screen.width", Kind::kInt, 0, 100000},
++    {"screen.height", Kind::kInt, 0, 100000},
++    {"screen.availWidth", Kind::kInt, 0, 100000},
++    {"screen.availHeight", Kind::kInt, 0, 100000},
++    {"screen.colorDepth", Kind::kInt, 1, 128},
++    {"webgl.unmasked_vendor", Kind::kString},
++    {"webgl.unmasked_renderer", Kind::kString},
++    {"audio.randomDouble", Kind::kNumber, -1e9, 1e9},
++    {"canvas.toDataUrl.randomDouble", Kind::kNumber, -1e9, 1e9},
++    {"canvas.fillRectNoise", Kind::kBool},
++    {"webrtc.public_ip", Kind::kIPv4},
++    {"webrtc.private_ip", Kind::kIPv4},
++    {"webrtc.sdp_redact", Kind::kBool},
++};
++
++struct ConfigState {
++  base::Lock lock;
++  bool frozen = false;
++  std::shared_ptr<const WebViewFingerprintConfig> snapshot =
++      std::make_shared<WebViewFingerprintConfig>();
++};
++
++ConfigState& State() {
++  static base::NoDestructor<ConfigState> state;
++  return *state;
++}
++
++bool ValidIPv4(std::string_view text) {
++  for (int i = 0; i < 4; ++i) {
++    size_t dot = text.find('.');
++    auto part = text.substr(0, dot);
++    unsigned number;
++    if (part.empty() || part.size() > 3 ||
++        (part.size() > 1 && part.front() == '0') ||
++        !std::all_of(part.begin(), part.end(),
++                     [](unsigned char c) { return c >= '0' && c <= '9'; }) ||
++        !base::StringToUint(part, &number) || number > 255) {
++      return false;
++    }
++    if (i == 3) {
++      return dot == std::string_view::npos;
++    }
++    if (dot == std::string_view::npos) {
++      return false;
++    }
++    text.remove_prefix(dot + 1);
++  }
++  return false;
++}
++
++bool Convert(const Field& field,
++             const base::Value& value,
++             std::string& output) {
++  if (field.kind == Kind::kBool) {
++    if (!value.is_bool()) {
++      return false;
++    }
++    output = value.GetBool() ? "1" : "0";
++    return true;
++  }
++  if (field.kind == Kind::kInt || field.kind == Kind::kNumber) {
++    if (!value.is_int() && !value.is_double()) {
++      return false;
++    }
++    const double number = value.GetDouble();
++    if (!std::isfinite(number) || number < field.minimum ||
++        number > field.maximum ||
++        (field.kind == Kind::kInt && std::floor(number) != number)) {
++      return false;
++    }
++    output = field.kind == Kind::kInt
++                 ? base::NumberToString(static_cast<int>(number))
++                 : base::NumberToString(number);
++    return true;
++  }
++  if (field.kind == Kind::kBrands) {
++    if (!value.is_list() || value.GetList().empty() ||
++        value.GetList().size() > 16) {
++      return false;
++    }
++    for (const auto& item : value.GetList()) {
++      if (!item.is_dict() || item.GetDict().size() != 2) {
++        return false;
++      }
++      const auto* brand = item.GetDict().FindString("brand");
++      const auto* version = item.GetDict().FindString("version");
++      auto valid = [](const std::string* text) {
++        return text && !text->empty() && text->size() <= 128 &&
++               std::all_of(text->begin(), text->end(), [](unsigned char c) {
++                 return c >= 32 && c <= 126 && c != ',' && c != '&';
++               });
++      };
++      if (!valid(brand) || !valid(version)) {
++        return false;
++      }
++      if (!output.empty()) {
++        output += '&';
++      }
++      output += *brand + "," + *version;
++    }
++    return true;
++  }
++  if (!value.is_string()) {
++    return false;
++  }
++  output = value.GetString();
++  if (output.size() > 4096 || output.find('\0') != std::string::npos) {
++    return false;
++  }
++  if (field.kind == Kind::kAscii &&
++      !std::all_of(output.begin(), output.end(),
++                   [](unsigned char c) { return c >= 32 && c <= 126; })) {
++    return false;
++  }
++  if (field.kind == Kind::kHeader &&
++      !std::all_of(output.begin(), output.end(), [](unsigned char c) {
++        return c == '\t' || (c >= 32 && c != 127);
++      })) {
++    return false;
++  }
++  if (field.key == "navigator.useragent" && output.empty()) {
++    return false;
++  }
++  if (field.kind == Kind::kIPv4 && !ValidIPv4(output)) {
++    return false;
++  }
++  if (field.kind == Kind::kProxy) {
++    if (!output.starts_with("http://") && !output.starts_with("https://") &&
++        !output.starts_with("socks5://")) {
++      return false;
++    }
++    // SOCKS5 is not a standard GURL scheme. Validate its authority through an
++    // HTTP URL; the actual endpoint is still parsed by Chromium's net stack.
++    const GURL url(output.starts_with("socks5://")
++                       ? "http://" + output.substr(9)
++                       : output);
++    if ((!url.SchemeIs("http") && !url.SchemeIs("https") &&
++         !url.SchemeIs("socks5")) ||
++        !url.is_valid() || url.host().empty() || url.has_username() ||
++        url.has_password() || url.has_query() || url.has_ref() ||
++        (url.has_port() && url.IntPort() <= 0) ||
++        !std::all_of(output.begin(), output.end(),
++                     [](unsigned char c) { return c > 32 && c < 127; }) ||
++        output.find_first_of("\\,;= \t\r\n") != std::string::npos ||
++        output.substr(output.find("://") + 3).find('/') != std::string::npos) {
++      return false;
++    }
++  }
++  if (field.key == "navigator.connection.type") {
++    constexpr std::string_view types[] = {"bluetooth", "cellular", "ethernet",
++                                          "none",      "other",    "unknown",
++                                          "wifi",      "wimax"};
++    if (std::find(std::begin(types), std::end(types), output) ==
++        std::end(types)) {
++      return false;
++    }
++  }
++  if (field.key == "navigator.connection.effectiveType" &&
++      output != "slow-2g" && output != "2g" && output != "3g" &&
++      output != "4g") {
++    return false;
++  }
++  return true;
++}
++}  // namespace
++
++std::optional<std::string> WebViewFingerprintConfig::Find(
++    std::string_view name) const {
++  auto it = values.find(name);
++  return it == values.end() ? std::nullopt : std::make_optional(it->second);
++}
++
++std::string ConfigureWebViewFingerprint(std::string_view json) {
++  if (json.size() > kMaxConfigBytes) {
++    return "Fingerprint JSON exceeds 32768 bytes";
++  }
++  auto root = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++  if (!root || root->size() != 3 || root->FindInt("version") != 1 ||
++      !root->FindBool("enabled").has_value() || !root->FindDict("settings")) {
++    return "Expected version:1, enabled:boolean and settings:object";
++  }
++  auto next = std::make_shared<WebViewFingerprintConfig>();
++  next->enabled = *root->FindBool("enabled");
++  for (const auto [key, value] : *root->FindDict("settings")) {
++    auto field =
++        std::find_if(std::begin(kFields), std::end(kFields),
++                     [&](const Field& item) { return item.key == key; });
++    if (field == std::end(kFields)) {
++      return "Unknown fingerprint setting: " + key;
++    }
++    std::string converted;
++    if (!Convert(*field, value, converted)) {
++      return "Invalid type or value for fingerprint setting: " + key;
++    }
++    next->values.emplace("chromium." + key, std::move(converted));
++  }
++  auto serialized = base::WriteJson(*root);
++  if (!serialized) {
++    return "Unable to serialize fingerprint configuration";
++  }
++  next->serialized = std::move(*serialized);
++  auto& state = State();
++  base::AutoLock lock(state.lock);
++  if (state.frozen) {
++    return "Fingerprint configuration is frozen; configure before WebView "
++           "startup";
++  }
++  state.snapshot = std::move(next);
++  return {};
++}
++
++void FreezeWebViewFingerprint() {
++  auto& state = State();
++  base::AutoLock lock(state.lock);
++  state.frozen = true;
++}
++
++std::shared_ptr<const WebViewFingerprintConfig> GetWebViewFingerprintConfig() {
++  auto& state = State();
++  base::AutoLock lock(state.lock);
++  return state.snapshot;
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/common/webview/property_overrides.cc b/third_party/blink/common/webview/property_overrides.cc
+index 68d63fb2cb45d9b2343bb4e034b9331bb8c0ea8c..a23b929069932fe71cf42e58cf268b655cfef326 100644
+--- a/third_party/blink/common/webview/property_overrides.cc
++++ b/third_party/blink/common/webview/property_overrides.cc
+@@ -10,30 +10,8 @@
+ #include <cmath>
+ #include <memory>
+ 
+-#include "build/build_config.h"
+-#if BUILDFLAG(IS_ANDROID)
+-#include <sys/system_properties.h>
+-#endif
+-
+ namespace blink {
+ namespace {
+-std::optional<std::string> RawProperty(const char* name) {
+-#if BUILDFLAG(IS_ANDROID)
+-  const prop_info* info = __system_property_find(name);
+-  if (info) {
+-    std::string value;
+-    __system_property_read_callback(
+-        info,
+-        [](void* cookie, const char*, const char* text, uint32_t) {
+-          *static_cast<std::string*>(cookie) = text;
+-        },
+-        &value);
+-    return value;
+-  }
+-#endif
+-  return std::nullopt;
+-}
+-
+ bool ValidHeaderValue(std::string_view value) {
+   return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+     return c == '\t' || (c >= 32 && c != 127);
+@@ -42,14 +20,14 @@ bool ValidHeaderValue(std::string_view value) {
+ }  // namespace
+ 
+ WebViewPropertyOverrides::WebViewPropertyOverrides()
+-    : enabled_(RawProperty("chromium.enable") == "1") {}
++    : snapshot_(GetWebViewFingerprintConfig()), enabled_(snapshot_->enabled) {}
+ 
+ std::optional<std::string> WebViewPropertyOverrides::GetString(
+     const char* name) const {
+   if (!enabled_) {
+     return std::nullopt;
+   }
+-  auto value = RawProperty(name);
++  auto value = snapshot_->Find(name);
+   if (!value || value->empty() || *value == "-") {
+     return std::nullopt;
+   }
+@@ -108,13 +86,6 @@ std::optional<std::string> WebViewPropertyOverrides::UserAgent() const {
+   if (!first) {
+     return std::nullopt;
+   }
+-  for (const char* key :
+-       {"chromium.navigator.useragent2", "chromium.navigator.useragent3"}) {
+-    auto next = RawProperty(key);
+-    if (next && *next != "-") {
+-      first->append(*next);
+-    }
+-  }
+   return ValidHeaderValue(*first) ? first : std::nullopt;
+ }
+ 
+@@ -122,7 +93,7 @@ std::optional<std::string> WebViewPropertyOverrides::RequestedWith() const {
+   if (!enabled_) {
+     return std::nullopt;
+   }
+-  auto value = RawProperty("chromium.config.x_requested_with");
++  auto value = snapshot_->Find("chromium.config.x_requested_with");
+   if (!value || *value == "-" || !ValidHeaderValue(*value)) {
+     return std::nullopt;
+   }
+diff --git a/third_party/blink/public/common/BUILD.gn b/third_party/blink/public/common/BUILD.gn
+index a4cc9477106aba8a27509561dc62734efe0fceaa..9d8819bb9dce7272d26c031b5499793cbc5d7708 100644
+--- a/third_party/blink/public/common/BUILD.gn
++++ b/third_party/blink/public/common/BUILD.gn
+@@ -310,6 +310,7 @@ source_set("headers") {
+     "webid/login_status_options.h",
+     "webrtc/rtc_logging_mojom_traits.h",
+     "webrtc/rtc_logging_utils.h",
++    "webview/fingerprint_config.h",
+     "webview/property_overrides.h",
+     "widget/constants.h",
+     "widget/device_emulation_params.h",
+diff --git a/third_party/blink/public/common/webview/fingerprint_config.h b/third_party/blink/public/common/webview/fingerprint_config.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7759fde5905643fa770882cb40302e3f02013ef1
+--- /dev/null
++++ b/third_party/blink/public/common/webview/fingerprint_config.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_PUBLIC_COMMON_WEBVIEW_FINGERPRINT_CONFIG_H_
++#define THIRD_PARTY_BLINK_PUBLIC_COMMON_WEBVIEW_FINGERPRINT_CONFIG_H_
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <string_view>
++
++#include "third_party/blink/public/common/common_export.h"
++
++namespace blink {
++
++inline constexpr char kWebViewFingerprintSwitch[] =
++    "webview-fingerprint-config";
++
++// Published as an immutable snapshot. Internal keys retain the existing hook
++// names; none of them are Android system properties anymore.
++struct BLINK_COMMON_EXPORT WebViewFingerprintConfig {
++  bool enabled = false;
++  std::map<std::string, std::string, std::less<>> values;
++  std::string serialized = R"({"version":1,"enabled":false,"settings":{}})";
++  std::optional<std::string> Find(std::string_view name) const;
++};
++
++// Empty return value means success. Failure leaves the current snapshot intact.
++// Configuration is accepted only before the browser/renderer startup freeze.
++BLINK_COMMON_EXPORT std::string ConfigureWebViewFingerprint(
++    std::string_view json);
++BLINK_COMMON_EXPORT void FreezeWebViewFingerprint();
++BLINK_COMMON_EXPORT std::shared_ptr<const WebViewFingerprintConfig>
++GetWebViewFingerprintConfig();
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_PUBLIC_COMMON_WEBVIEW_FINGERPRINT_CONFIG_H_
+diff --git a/third_party/blink/public/common/webview/property_overrides.h b/third_party/blink/public/common/webview/property_overrides.h
+index b5f0f8f87117f5a29db97a64733fb681879537ee..81c81850737d3d09e4c2186a6d02a0e308cbc947 100644
+--- a/third_party/blink/public/common/webview/property_overrides.h
++++ b/third_party/blink/public/common/webview/property_overrides.h
+@@ -15,11 +15,12 @@
+ 
+ #include "base/containers/span.h"
+ #include "third_party/blink/public/common/common_export.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
+ 
+ namespace blink {
+ 
+-// Capture the master switch once per operation. Do not keep instances across
+-// navigations: individual properties are read when requested, not cached.
++// Compatibility adapter for existing hooks. Every operation reads one immutable
++// host-supplied snapshot; no Android system-property service is used.
+ class BLINK_COMMON_EXPORT WebViewPropertyOverrides {
+  public:
+   WebViewPropertyOverrides();
+@@ -34,7 +35,7 @@ class BLINK_COMMON_EXPORT WebViewPropertyOverrides {
+   std::optional<std::string> UserAgent() const;
+   // nullopt: upstream policy; empty string: remove; otherwise replace.
+   std::optional<std::string> RequestedWith() const;
+-  // Nonempty startup proxy URI. Validation and enforcement live in WebView.
++  // Nonempty startup proxy URI from the validated unified configuration.
+   std::optional<std::string> NetworkProxy() const;
+   std::vector<std::pair<std::string, std::string>> Brands(
+       const char* name) const;
+@@ -44,6 +45,7 @@ class BLINK_COMMON_EXPORT WebViewPropertyOverrides {
+   std::string RedactSdp(std::string_view input) const;
+ 
+  private:
++  const std::shared_ptr<const WebViewFingerprintConfig> snapshot_;
+   const bool enabled_;
+ };
+ 
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+index ecdf30c5723b7e05409a0f70ea9793318b51e99a..aa1b850f88dc4ce3983a7bfc3689fe74416582a1 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+@@ -78,6 +78,7 @@
+ #include "third_party/blink/renderer/core/typed_arrays/array_buffer_view_helpers.h"
+ #include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h"
++#include "third_party/blink/public/common/webview/property_overrides.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/cached_color.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_filter.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_gradient.h"
+@@ -1758,7 +1759,9 @@ void Canvas2DRecorderContext::fillRect(double x,
+ 
+   // Normalize signed dimensions before applying the supplied fillRect noise.
+   CanvasRenderingContext::AdjustRectForCanvas(x, y, width, height);
+-  if (RuntimeEnabledFeatures::CanvasFillRectNoiseEnabled() && width != 0 &&
++  if (RuntimeEnabledFeatures::CanvasFillRectNoiseEnabled() &&
++      WebViewPropertyOverrides().GetBool("chromium.canvas.fillRectNoise") == true &&
++      width != 0 &&
+       height != 0) {
+     const auto offsets = GetCanvasFillRectNoise();
+     x += offsets[0];
+diff --git a/webview_custom/BUILD.gn b/webview_custom/BUILD.gn
+new file mode 100644
+index 0000000000000000000000000000000000000000..e662dabb20ab9a67c2bc513f319a0896ba69e8ab
+--- /dev/null
++++ b/webview_custom/BUILD.gn
+@@ -0,0 +1,16 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++executable("fingerprint_config_test") {
++  testonly = true
++  sources = [
++    "../third_party/blink/common/webview/fingerprint_config.cc",
++    "tests/fingerprint_config_test.cc",
++  ]
++  defines = [ "BLINK_COMMON_IMPLEMENTATION" ]
++  deps = [
++    "//base",
++    "//url",
++  ]
++}
+diff --git a/webview_custom/NETWORK_POLICY.md b/webview_custom/NETWORK_POLICY.md
+index 96e33edc78e46395d2d9d807433075fdab61cc43..96b791f8976c12363c7bc1aed6e8e4296223b46d 100644
+--- a/webview_custom/NETWORK_POLICY.md
++++ b/webview_custom/NETWORK_POLICY.md
+@@ -1,28 +1,16 @@
+ # WebView 网络策略
+ 
+-本阶段为现有系统属性配置增加真正作用于 Chromium 网络栈的代理模式，并统一自定义 UA 的 WebView 入口。默认不设置代理，继续使用原生系统 / AndroidX 网络配置。
++本版本通过统一 JSON 配置提供真正作用于 Chromium 网络栈的代理模式，并统一自定义 UA 的 WebView 入口。默认不设置代理，继续使用原生系统 / AndroidX 网络配置。
+ 
+ ## 启用与关闭
+ 
+-在具有系统属性写权限的设备 shell 中，先设置配置，再启动宿主 App：
++通过宿主 App 的统一入口 `Fingerprint.configure(json)` 配置；不再读取系统属性。完整调用代码见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。
+ 
+-```sh
+-# 三种格式任选其一；地址仅为文档示例，必须换成设备可达的代理。
+-setprop chromium.network.proxy 'http://192.0.2.1:7890'
+-# setprop chromium.network.proxy 'https://proxy.example:443'
+-# setprop chromium.network.proxy 'socks5://proxy.example:1080'
+-setprop chromium.enable 1
+-```
+-
+-关闭本次新增的代理模式，保留其他自定义功能：
+-
+-```sh
+-setprop chromium.network.proxy -
++```json
++{"version":1,"enabled":true,"settings":{"network.proxy":"socks5://192.0.2.1:1080"}}
+ ```
+ 
+-该属性不存在、为空字符串或为 `-` 时不启用代理；`chromium.enable` 不是 `1` 时同样不启用。注意它与 `x_requested_with` 的空字符串语义不同。
+-
+-代理策略在宿主浏览器进程首次使用时保存快照；包括总开关在内的任何网络配置变更，都必须完整退出并重新启动宿主 App。仅刷新页面或重启 renderer 不足以更换策略。重新创建 NetworkContext / 网络服务时继续使用同一快照，避免部分连接使用新配置、部分使用旧配置。
++地址仅为示例，必须换成设备可达的代理；同样支持 `http://` 和 `https://`。不设置 network.proxy 或 enabled=false 时使用原生网络。配置必须在 WebView 启动前提交；启动后修改明确失败，需完整重启宿主进程。
+ 
+ ## 代理模式的行为
+ 
+@@ -30,23 +18,23 @@ setprop chromium.network.proxy -
+ - 代理配置应用到 WebView 的 NetworkContext，包括经过该上下文的 HTTP / HTTPS、WebSocket 和预取等请求。真实连接由网络栈执行，不通过修改页面返回的 IP 文本模拟。
+ - 只有一个代理选项，没有 DIRECT 后备；连接失败不会自动回退直连。
+ - 去掉 Chromium 对 localhost、回环和链路本地 URL 的隐式代理绕过。此模式不提供域名直连白名单；访问这些 HTTP URL 也会交给所选代理。
+-- 非空但无效的配置保留为空的 PROXY_LIST，使请求失败；不会把解析错误转换成原生直连。日志会报告错误，不输出配置原文。修正属性后重启 App。
+-- 配置优先于系统代理、命令行代理及 AndroidX ProxyController。该模式下调用 SetProxyOverride 会返回冲突说明；ClearProxyOverride 不能清除这个启动配置。先将属性设为 `-` 并重启，才能恢复 AndroidX 控制。
++- 统一入口先拒绝非法代理 URI并保持旧配置；网络层仍以空 PROXY_LIST 防御解析差异，遇到这类异常使请求失败，不回退直连。
++- 配置优先于系统代理、命令行代理及 AndroidX ProxyController。该模式下调用 SetProxyOverride 会返回冲突说明；ClearProxyOverride 不能清除这个启动配置。下次启动时从 JSON 中省略 network.proxy，才能恢复 AndroidX 控制。
+ - WebRTC 使用原生 `disable_non_proxied_udp` 策略，禁止非代理 UDP 和多网络接口收集；同时移除可能放宽该限制的按 URL 例外。TCP / TURN 连接是否可用取决于代理和服务端，通话可能失败。
+ - WebTransport 在代理模式下明确拒绝，避免将不支持所选代理的传输当成普通 HTTPS。默认原生模式保留上游行为。
+ - 停用旧的 `webrtc.public_ip`、`webrtc.private_ip` 和 `webrtc.sdp_redact` 文本改写。ICE / SDP 报告真实路由策略的结果。恢复原生网络模式后，旧配置仍按原有规则生效。
+ 
+ ## UA 和请求头
+ 
+-`chromium.navigator.useragent` / `useragent2` / `useragent3` 的同一配置现在也接入 WebView 默认 UA 构造和 WebContents UA 设置，而不只在 URLLoader 最后修改 HTTP 头。它覆盖 App 显式设置的 UA，延续此前自定义属性优先的规则；配置非法时仍回退原生处理。
++`settings["navigator.useragent"]` 的同一配置现在也接入 WebView 默认 UA 构造和 WebContents UA 设置，而不只在 URLLoader 最后修改 HTTP 头。它覆盖 App 显式设置的 UA，延续此前统一配置优先的规则；配置非法时仍回退原生处理。
+ 
+ UA-CH 继续使用已有浏览器侧元数据入口及权限规则。任意 UA 字符串不会自动转换成一套新设备资料；修改 UA 时仍需配套设置 `navigator.userAgentMeta.*`。本阶段没有推测或生成虚构的 GPU、系统版本等信息。
+ 
+-X-Requested-With 仍保留三种语义：未设置 / `-` 使用原生策略，合法非空值替换，显式空值删除；重定向与预取复用现有处理。这个头不会改变网络出口。
++X-Requested-With 保留三种语义：未设置使用原生策略，合法非空值替换，显式空值删除；重定向与预取复用现有处理。这个头不会改变网络出口。
+ 
+ ## 作用范围和验证边界
+ 
+-当前网络配置是宿主进程级，所有 WebView Profile 共用，不是每个 Profile 独立的代理 API。它不代理宿主自己的 OkHttp、下载器、其他 App 或整个 Android 系统。没有改变 TLS 实现或系统 DNS 设置。
++当前统一网络配置是宿主进程级，所有 WebView Profile 共用，不是每个 Profile 独立的代理 API。它不代理宿主自己的 OkHttp、下载器、其他 App 或整个 Android 系统。没有改变 TLS 实现或系统 DNS 设置。
+ 
+ HTTP / SOCKS5 的请求目标解析遵循 Chromium 对相应协议的实现；代理主机域名本身、WebRTC 解析、预解析及设备网络策略仍需抓包检查。本功能不承诺设备级 DNS 隔离，不能代替系统 VPN。
+ 
+@@ -63,4 +51,4 @@ python3 webview_custom/test_noise.py
+ 
+ `AwNetworkPropertyPolicyTest.*` 使用实际 net 解析、路由、回退和 Mojo 序列化。已加入 `android_webview_unittests`，需设备或模拟器执行；仅编译这些测试不代表设备测试通过。
+ 
+-真机验收至少覆盖：默认无配置、有效代理、代理不可达、非法配置、网络切换及网络服务重建。用受控服务端检查 UA / UA-CH / X-Requested-With、重定向和 WebSocket，抓包检查 WebRTC 非代理 UDP、WebTransport 和 DNS。当前未完成这些真机检查。
++真机验收至少覆盖：默认无配置、有效代理、代理不可达、非法配置被拒绝、网络切换及网络服务重建。用受控服务端检查 UA / UA-CH / X-Requested-With、重定向和 WebSocket，抓包检查 WebRTC 非代理 UDP、WebTransport 和 DNS。当前未完成这些真机检查。
+diff --git a/webview_custom/PROPERTY_PATCHES.md b/webview_custom/PROPERTY_PATCHES.md
+index 2a6f9d59939e2d68edc752840f3f92c2b0647103..77ff0b37b8909540b0cb92161379fc086d02b8eb 100644
+--- a/webview_custom/PROPERTY_PATCHES.md
++++ b/webview_custom/PROPERTY_PATCHES.md
+@@ -4,30 +4,18 @@
+ 
+ ## 配置
+ 
+-新功能默认关闭。由具有 Android 属性写权限的控制程序设置 `chromium.enable=1` 后启用；普通第三方 App、adb shell 在 user ROM 上可能无权写入，renderer 的属性读取也受 SELinux 控制。构建签名不会赋予这些权限；必须在目标 ROM 实测。未设置、空值或 `-` 保持 Chromium 默认（X-Requested-With 的空值例外）。修改配置后重启宿主 App 并重新加载页面；UA-CH 为对象/导航快照。
++本版本已取消系统属性读取。使用宿主 App 的 `Fingerprint.configure(json)` 统一入口，调用必须早于 WebView 启动；完整格式和生命周期见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。以下字段均放在 `settings` 对象内，不带 `chromium.` 前缀。数字 / 布尔值使用 JSON 原生类型。未知字段、类型错误或越界使整份配置失败，旧配置保持不变。
+ 
+-```sh
+-# 在具有属性写权限的设备 shell 中执行
+-setprop chromium.navigator.hardwareConcurrency 8
+-setprop chromium.navigator.deviceMemory 8
+-setprop chromium.screen.width 1080
+-setprop chromium.screen.height 1920
+-setprop chromium.config.x_requested_with com.example.app
+-setprop chromium.enable 1
+-# 全局关闭本次迁移新增功能
+-setprop chromium.enable 0
+-```
+-
+-| 属性（均以 chromium. 开头） | 用途及格式 |
++| settings 字段 | 用途及格式 |
+ | --- | --- |
+-| config.x_requested_with | 未设置或 `-`：原生包名策略；非空：强制替换；显式空字符串：删除，示例 `setprop chromium.config.x_requested_with ''` |
+-| network.proxy | 新增进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。非法非空配置阻断代理请求，修改后重启 App，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
+-| navigator.useragent / useragent2 / useragent3 | 按顺序拼接 HTTP / JS UA，首段必须非空；拒绝控制字符。每段受 Android 属性长度限制 |
+-| navigator.userAgentMeta.brands / fullVersionList | `Chromium,158&Android WebView,158` 格式，完整版本单独配置，拒绝不完整条目 |
+-| navigator.userAgentMeta.mobile / wow64 | 0/1 或 false/true |
++| config.x_requested_with | 未设置：原生包名策略；非空合法字符串：替换；空字符串：删除 |
++| network.proxy | 进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。入口拒绝非法 URI，修改需重启宿主进程，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
++| navigator.useragent | 完整 HTTP / JS UA 字符串，最多 4096 字节；拒绝非法控制字符。不再分段 |
++| navigator.userAgentMeta.brands / fullVersionList | `[{"brand":"Chromium","version":"158"}]` 数组；完整版本列表单独配置 |
++| navigator.userAgentMeta.mobile / wow64 | JSON 布尔值 true/false |
+ | navigator.userAgentMeta.platform / platformVersion / architecture / model / fullVersion / bitness | UA-CH 字段，要求可序列化的 ASCII；保留高熵提示权限策略与按需发送规则 |
+ | navigator.productSub / vendor / platform | JS Navigator 字符串，含继承自 NavigatorID 的字段 |
+-| navigator.cookieEnabled | 0/1 或 false/true；仅报告值，不改变 Cookie 权限和存储 |
++| navigator.cookieEnabled | JSON 布尔值 true/false；仅报告值，不改变 Cookie 权限和存储 |
+ | navigator.hardwareConcurrency | 整数 1..1024 |
+ | navigator.deviceMemory | 有限数 0.125..1024（GiB 的报告值） |
+ | navigator.maxTouchPoints | 整数 0..100 |
+@@ -37,7 +25,7 @@ setprop chromium.enable 0
+ | window.devicePixelRatio | 有限数 0.01..100；报告值，不改变硬件分辨率 |
+ | screen.width / height / availWidth / availHeight | 整数 0..100000 |
+ | screen.colorDepth | 整数 1..128，pixelDepth 跟随 |
+-| navigator.battery.charging | 0/1 或 false/true |
++| navigator.battery.charging | JSON 布尔值 true/false |
+ | navigator.battery.chargingTime / dischargingTime | 有限秒数 0..1e15 |
+ | navigator.battery.level | 有限数 0..1 |
+ | navigator.bluetooth | false/0 时 getter 返回 null；true 不强制打开原本不可用的 API |
+@@ -51,9 +39,9 @@ setprop chromium.enable 0
+ | webgl.unmasked_vendor / unmasked_renderer | 仅修改 WEBGL_debug_renderer_info 解锁后的字符串；保留扩展及 context-lost 检查，不改变真实 GPU |
+ | canvas.toDataUrl.randomDouble | 有限配置数，0 关闭；通过 seed 位混合选择起点，扫描实际像素寻找不透明的 8-bit RGBA/BGRA 像素，仅找到时复制并翻转一个颜色位后编码。跳过行填充；无候选像素不分配副本。保持原画布及编码格式；不影响 toBlob/getImageData |
+ 
+-数值解析失败、越界或 NaN/Infinity 会回退原值，不输出逐次 WARNING 日志。各项仅改变暴露的值或文中所述数据；不绕过 API 可用性、权限、安全上下文或宿主设置。
++配置入口拒绝数值类型错误、越界及非有限值，整份失败不改变旧配置。各项仅改变暴露的值或文中所述数据；不绕过 API 可用性、权限、安全上下文或宿主设置。
+ 
+-此前 `CanvasFillRectNoise` 独立于 `chromium.enable`，仍保持原来的默认开关。Android user ROM 不保证读取 `/data/local/tmp/webview-command-line`，不能依靠该文件停用它。
++新增 `canvas.fillRectNoise` 布尔项；默认关闭，仅在统一配置 enabled=true 且该项=true 时开启原 fillRect 噪声。
+ 
+ ## 原补丁处理
+ 
+@@ -69,16 +57,16 @@ setprop chromium.enable 0
+ 
+ ## 验证
+ 
+-`python3 webview_custom/test_properties.py` 编译生产实现、实际请求头策略函数和测试边界适配器，覆盖属性解析、请求头操作、UA、brands、ICE/SDP、音频与像素索引，并启用 AddressSanitizer/UndefinedBehaviorSanitizer。
++`python3 webview_custom/test_properties.py` 编译生产 getter、实际请求头策略函数和配置存储边界适配器，覆盖属性解析、请求头操作、UA、brands、ICE/SDP、音频与像素索引，并启用 AddressSanitizer/UndefinedBehaviorSanitizer。
+ 
+-`python3 webview_custom/test_review_regressions.py` 执行实际生产方法体的 9 个回归用例；仅模拟 Bionic 属性服务、容器和编码器边界，不模拟方法实现。测试不验证 PNG 编码器本身或 V8 行为；APK 构建检查实际 Android 类型、编译和链接。现有 `test_noise.py` 验证 81 种 fillRect 偏移。
++`python3 webview_custom/test_review_regressions.py` 执行实际生产方法体的 9 个回归用例；仅模拟配置存储、容器和编码器边界，不模拟方法实现。测试不验证 PNG 编码器本身或 V8 行为；APK 构建检查实际 Android 类型、编译和链接。现有 `test_noise.py` 验证 81 种 fillRect 偏移。
+ 
+-主机测试不能代替 RK14 的属性权限、真实网络和页面测试。
++实际 JSON 存储测试见 UNIFIED_CONFIG.md；主机测试不能代替 RK14 的宿主调用、真实网络和页面测试。
+ 
+ ## 代码质量修复
+ 
+ - WebView 专用配置实现移到 Blink common，移除 base 中的产品策略和大段内联代码；Bionic 头文件保留在实现文件。
+-- 每次操作只读取一次主开关；UA-CH 在浏览器侧创建元数据时处理，renderer setter 和公共序列化保持原生行为。
++- 每次操作捕获同一份不可变配置快照；UA-CH 在浏览器侧创建元数据时处理，renderer setter 和公共序列化保持原生行为。
+ - AndroidX 自定义 UA 元数据与默认元数据使用同一校验；非法 ASCII 值回退原值。
+ - 内部音频访问不触发噪声；JavaScript 两种读取接口仍共享一次处理后的数据，Zero 重置处理状态。
+ - ICE 仅处理 candidate 前缀和规范 IPv4，保留原有空白、端口及扩展；不修改不符合结构的输入。
+diff --git a/webview_custom/README.md b/webview_custom/README.md
+index 6d1569a6557125970397d06f46fb369662e3d4d7..2547e399fb928012147ea467c8370ffc606c802c 100644
+--- a/webview_custom/README.md
++++ b/webview_custom/README.md
+@@ -1,3 +1,7 @@
++# 统一指纹配置版本
++
++本版本使用宿主 App 的 JSON 统一入口，已取消 Android 系统属性读取。接入代码、字段、生命周期及 SOCKS5 用法见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。默认不启用字段覆盖、代理或 Canvas 扰动；旧 Window IDL 定制保留。以下为早期迁移记录，其中旧的默认噪声行为已由统一入口取代。
++
+ # Chromium WebView 自定义补丁
+ 
+ - 上游基线：`51b3c21991199bc9531e7d296056dd9351554c0c`，版本 `158.0.8109.0`。
+diff --git a/webview_custom/UNIFIED_CONFIG.md b/webview_custom/UNIFIED_CONFIG.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f9e06f9282e5c185b1b4030f40d8345a60cbbff
+--- /dev/null
++++ b/webview_custom/UNIFIED_CONFIG.md
+@@ -0,0 +1,99 @@
++# 统一指纹配置入口（version 1）
++
++本版本取消 Android `chromium.*` 系统属性读取。宿主 App 在 WebView 启动前调用一次 JSON 配置入口，浏览器、renderer、Worker 和网络侧使用同一份配置。旧 `setprop` 命令不再生效，APK 签名不影响配置能力。
++
++## 宿主 App 接入
++
++把 [android/Fingerprint.java](android/Fingerprint.java) 复制到宿主项目，在主线程、创建第一个 WebView 之前调用：
++
++```java
++import com.xpchromium.Fingerprint;
++
++// 可在 Application.onCreate 中执行，必须早于任何 WebView、预热、预取、
++// CookieManager、ServiceWorkerController 等可能启动 WebView 的调用。
++Fingerprint.configure(json);
++WebView webView = new WebView(context);
++```
++
++封装通过公开 API `WebView.getWebViewClassLoader()` 获取当前 provider，调用 `com.android.webview.chromium.FingerprintConfig.configure(String)`。不依赖隐藏 Android API、root、系统属性、共享文件或网页 JS 注入。只在安装本版本 xpChromium provider 时可用；宿主自身仍应遵循 WebView 的数据目录等初始化要求。
++
++provider 方法返回空字符串表示成功，非空字符串表示拒绝原因；封装将拒绝转换为异常。调用过晚、安装了其他 provider 或配置有误时，应处理错误，不应忽略后继续当作已配置成功。宿主代码需由你集成，本仓库没有自动改写你的浏览器 App。
++
++## JSON 格式
++
++```json
++{
++  "version": 1,
++  "enabled": true,
++  "settings": {
++    "navigator.useragent": "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/158.0.0.0 Mobile Safari/537.36",
++    "navigator.hardwareConcurrency": 8,
++    "navigator.deviceMemory": 8,
++    "navigator.maxTouchPoints": 5,
++    "navigator.userAgentMeta.mobile": true,
++    "navigator.userAgentMeta.platform": "Android",
++    "navigator.userAgentMeta.brands": [
++      {"brand": "Chromium", "version": "158"},
++      {"brand": "Android WebView", "version": "158"}
++    ],
++    "config.x_requested_with": "",
++    "canvas.fillRectNoise": false
++  }
++}
++```
++
++这是调用示例，不是自动生成的完整设备身份。UA 和 UA-CH 的关联值仍由调用方配套提供。
++
++三个顶层字段均为必填，不能增加其他顶层字段。`settings` 使用不带 `chromium.` 前缀的字段名，清单见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。字段名区分大小写。数字和布尔值使用 JSON 原生类型，不要写成字符串。
++
++- `navigator.useragent` 是一个完整字符串，不再使用 `useragent2` / `useragent3` 分段；最多 4096 字节。
++- brands / fullVersionList 使用 `[{"brand":"...","version":"..."}]` 数组，不再使用 `&` 拼接字符串。
++- `config.x_requested_with` 缺省为原生策略，`""` 删除，非空合法字符串替换。
++- `network.proxy` 缺省为原生网络；设置时必须是单个合法 `http://`、`https://` 或 `socks5://` URI。用户名密码认证尚未实现。
++- `canvas.fillRectNoise` 默认关闭；只有 `enabled:true` 且该项为 `true` 时开启旧 fillRect 噪声。上游运行时功能开关仍可进一步禁用。
++- 单项字符串最多 4096 字节，完整 JSON 最多 32768 字节。UA-CH 结构化字符串限制为可序列化 ASCII；数值沿用原实现范围。
++
++## SOCKS5 和恢复默认
++
++启用代理的最小配置：
++
++```json
++{"version":1,"enabled":true,"settings":{"network.proxy":"socks5://192.0.2.1:1080"}}
++```
++
++示例地址必须替换为设备可达的代理。代理模式仍会禁止非代理 UDP、拒绝 WebTransport，并停用旧 ICE/SDP 文本改写。详见 [NETWORK_POLICY.md](NETWORK_POLICY.md)。无效代理 URI 在配置入口被拒绝，当前已接受的整份配置保持不变。
++
++启动前恢复配置默认值：
++
++```json
++{"version":1,"enabled":false,"settings":{}}
++```
++
++未调用入口时也使用这个默认配置。它关闭迁移的字段覆盖、代理和 Canvas 扰动；既有 Window/document/navigator 的 IDL 定制仍保留，不代表整个 APK 回到官方未修改版。
++
++## 生命周期和一致性
++
++配置按宿主进程管理，当前不能给同一进程的多个 WebView Profile 分别设置。不同宿主进程必须分别配置。
++
++入口会先完成整份校验，再原子替换快照；失败不改变已接受的配置。启动前再次成功调用是整份替换，不是字段合并。省略字段使用原生行为，删除旧字段时不要依赖上次调用的内容。
++
++浏览器进入启动阶段时冻结配置；读取网络策略也会冻结。之后的修改明确失败，需完整重启宿主进程再设置。提前读取默认 UA 不冻结配置；但已经缓存 UA 的宿主代码需要在配置后重新读取。
++
++renderer 启动参数携带已验证 JSON 的 Base64 编码，启动时先安装快照，再创建页面；同一 renderer 的 Worker 共享不可变快照。新 renderer / renderer 重建复用相同配置。单进程模式直接共享浏览器快照。Base64 只用于传输编码，请勿把密码或令牌放进指纹配置。
++
++网页没有这个入口，也没有通过 `addJavascriptInterface` 暴露任何配置能力。配置只在本次宿主进程中生效，不自动写文件保存。
++
++## 验证
++
++`webview_custom:fingerprint_config_test` 编译实际配置生产实现，使用 Chromium JSON、URL 与锁，覆盖默认值、类型和范围、非法字段、brands、代理格式、失败不改配置、整份替换、并发快照读取、冻结和新进程导入。
++
++```sh
++gn gen out/Fingerprint-host --root-target=//webview_custom:fingerprint_config_test \
++  --args='is_debug=false is_component_build=false symbol_level=0 use_remoteexec=false target_os="linux" target_cpu="x64"'
++autoninja -C out/Fingerprint-host -j 16 fingerprint_config_test
++out/Fingerprint-host/fingerprint_config_test
++```
++
++既有 `test_properties.py`、`test_review_regressions.py`、`test_network_identity.py` 验证生产 getter / 方法体，配置存储边界使用内存适配器；不再把它们当作 Bionic 属性服务测试。APK 构建验证 Java/JNI 注册、原生类型和链接。真实宿主调用、renderer/Worker 页面结果及设备网络仍需真机端到端测试。
++
++`smoke.html` 默认按 fillRect 噪声关闭检查；在统一配置显式启用该项时，加载 `smoke.html?noise=on` 检查噪声模式。
+diff --git a/webview_custom/android/Fingerprint.java b/webview_custom/android/Fingerprint.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ef2f9fe61e702f7645f14b37f8c6fc317d90caf
+--- /dev/null
++++ b/webview_custom/android/Fingerprint.java
+@@ -0,0 +1,33 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++package com.xpchromium;
++
++import android.os.Looper;
++import android.webkit.WebView;
++
++import java.lang.reflect.InvocationTargetException;
++
++/** Copy into the host app. Call on the main thread before any WebView startup. */
++public final class Fingerprint {
++    private Fingerprint() {}
++
++    public static void configure(String json) {
++        if (Looper.myLooper() != Looper.getMainLooper()) {
++            throw new IllegalStateException("Configure fingerprint on the main thread");
++        }
++        try {
++            Class<?> api = WebView.getWebViewClassLoader()
++                    .loadClass("com.android.webview.chromium.FingerprintConfig");
++            String error = (String) api.getMethod("configure", String.class).invoke(null, json);
++            if (error == null || !error.isEmpty()) {
++                throw new IllegalStateException("Fingerprint configuration rejected: " + error);
++            }
++        } catch (InvocationTargetException e) {
++            throw new IllegalStateException("Fingerprint provider call failed", e.getCause());
++        } catch (ReflectiveOperationException e) {
++            throw new IllegalStateException("Install the xpChromium unified-config WebView", e);
++        }
++    }
++}
+diff --git a/webview_custom/fingerprint.example.json b/webview_custom/fingerprint.example.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8e9c1aef486d8d2e97624f451d08ed071195227
+--- /dev/null
++++ b/webview_custom/fingerprint.example.json
+@@ -0,0 +1,13 @@
++{
++  "version": 1,
++  "enabled": true,
++  "settings": {
++    "navigator.hardwareConcurrency": 8,
++    "navigator.deviceMemory": 8,
++    "navigator.maxTouchPoints": 5,
++    "navigator.userAgentMeta.mobile": true,
++    "navigator.userAgentMeta.platform": "Android",
++    "config.x_requested_with": "",
++    "canvas.fillRectNoise": false
++  }
++}
+diff --git a/webview_custom/smoke.html b/webview_custom/smoke.html
+index 27d709470bc72a13dc40a90f96149dd9dc26d3b6..f429bd0d08b6a7697cc1935520165d4366bab9cf 100644
+--- a/webview_custom/smoke.html
++++ b/webview_custom/smoke.html
+@@ -87,7 +87,7 @@
+     }
+   });
+ 
+-  const noiseOff = new URLSearchParams(location.search).get('noise') === 'off';
++  const noiseOff = new URLSearchParams(location.search).get('noise') !== 'on';
+   function bounds(context, rectangle) {
+     context.clearRect(0, 0, 50, 50);
+     context.fillRect(...rectangle);
+diff --git a/webview_custom/test_review_regressions.py b/webview_custom/test_review_regressions.py
+index 316ef3ca4d2cd41283b409088d8c438d81f28612..c74851f03369d6fc4c86da133d1ceb774ba5ec8a 100644
+--- a/webview_custom/test_review_regressions.py
++++ b/webview_custom/test_review_regressions.py
+@@ -21,7 +21,7 @@ methods={
+ for key,items in methods.items():
+     code=code.replace(key,'\n'.join(definition(source_root,path,signature) for path,signature in items))
+ cases=['ipv4-canonical','ice-whitespace','ice-invalid-prefix','metadata-invalid-ascii',
+-       'metadata-one-enable-read','audio-native-read','audio-zero-reuse','canvas-other-row','canvas-transparent-copy']
++       'metadata-one-snapshot','audio-native-read','audio-zero-reuse','canvas-other-row','canvas-transparent-copy']
+ with host_build(source_root,code) as executable:
+     for case in cases:
+         subprocess.run([str(executable),case],check=True)
+diff --git a/webview_custom/test_support.py b/webview_custom/test_support.py
+index 7e16e0ac8653cfc56ef9ac07404a497749eb2946..0c438adc24d19e216d3933fe29c9f8cd33e94711 100644
+--- a/webview_custom/test_support.py
++++ b/webview_custom/test_support.py
+@@ -1,7 +1,10 @@
+ # Copyright 2026 The Chromium Authors
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+-"""Portable host tests: fake only Bionic/ABI boundaries, compile production code."""
++"""Portable hook tests: fake the config-store/ABI boundary, compile hook code.
++
++The real JSON store is exercised separately by fingerprint_config_test.
++"""
+ from contextlib import contextmanager
+ from pathlib import Path
+ import shutil
+@@ -45,6 +48,30 @@ def host_build(source_root, code):
+       cb(cookie,p->name.c_str(),p->value.c_str(),0);
+     }
+     ''')
++        config_header = work/'third_party/blink/public/common/webview/fingerprint_config.h'
++        config_header.parent.mkdir(parents=True, exist_ok=True)
++        config_header.write_text('''#pragma once
++#include <sys/system_properties.h>
++#include <memory>
++#include <optional>
++namespace blink {
++struct WebViewFingerprintConfig {
++  bool enabled = false;
++  std::map<std::string,std::string,std::less<>> values;
++  std::optional<std::string> Find(std::string_view key) const {
++    auto i=values.find(key);return i==values.end()?std::nullopt:std::make_optional(i->second);
++  }
++};
++inline std::shared_ptr<const WebViewFingerprintConfig> GetWebViewFingerprintConfig() {
++  ++reads["chromium.enable"]; // One capture per operation; test-only input adapter.
++  auto config=std::make_shared<WebViewFingerprintConfig>();
++  auto enabled=props.find("chromium.enable");
++  config->enabled=enabled!=props.end() && enabled->second.value=="1";
++  for(const auto& [key,value]:props)config->values.emplace(key,value.value);
++  return config;
++}
++}
++''')
+         driver=work/'test.cc'
+         driver.write_text(code)
+         executable=work/'test'
+diff --git a/webview_custom/tests/fingerprint_config_test.cc b/webview_custom/tests/fingerprint_config_test.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb37b4d6172bf190d540d300566257354b1b99f3
+--- /dev/null
++++ b/webview_custom/tests/fingerprint_config_test.cc
+@@ -0,0 +1,107 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
++
++#include <atomic>
++#include <iostream>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "base/check.h"
++#include "base/command_line.h"
++#include "base/json/json_reader.h"
++
++int main(int argc, char** argv) {
++  using blink::ConfigureWebViewFingerprint;
++  using blink::GetWebViewFingerprintConfig;
++  base::CommandLine::Init(argc, argv);
++  const auto arguments = base::CommandLine::ForCurrentProcess()->GetArgs();
++  if (arguments.size() == 1) {
++    // A fresh process validates the exact serialized renderer payload.
++    CHECK(ConfigureWebViewFingerprint(arguments.front()).empty());
++    blink::FreezeWebViewFingerprint();
++    CHECK(GetWebViewFingerprintConfig()->enabled);
++    CHECK(GetWebViewFingerprintConfig()->Find(
++              "chromium.navigator.hardwareConcurrency") == "8");
++    std::cout << "PASS renderer snapshot import\n";
++    return 0;
++  }
++  CHECK(!GetWebViewFingerprintConfig()->enabled);
++  const std::string valid = R"({"version":1,"enabled":true,"settings":{
++    "navigator.useragent":"Mozilla/5.0 configured WebView",
++    "navigator.hardwareConcurrency":8,"navigator.deviceMemory":8,
++    "config.x_requested_with":"","canvas.fillRectNoise":false,
++    "network.proxy":"socks5://[2001:db8::1]:1080",
++    "navigator.userAgentMeta.brands":[{"brand":"Chromium","version":"158"}]
++  }})";
++  CHECK(ConfigureWebViewFingerprint(valid).empty());
++  auto first = GetWebViewFingerprintConfig();
++  CHECK(first->enabled);
++  CHECK(first->Find("chromium.config.x_requested_with") == "");
++  CHECK(first->Find("chromium.canvas.fillRectNoise") == "0");
++  CHECK(first->Find("chromium.navigator.userAgentMeta.brands") ==
++        "Chromium,158");
++  CHECK(base::JSONReader::ReadDict(first->serialized, base::JSON_PARSE_RFC));
++
++  const std::vector<std::string> invalid = {
++      "{",
++      "[]",
++      R"({"version":2,"enabled":true,"settings":{}})",
++      R"({"version":1,"enabled":"true","settings":{}})",
++      R"({"version":1,"enabled":true,"settings":{},"extra":1})",
++      R"({"version":1,"enabled":true,"settings":{"unknown":1}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.hardwareConcurrency":"8"}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.hardwareConcurrency":0}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.hardwareConcurrency":8.5}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.useragent":"x\r\ny"}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.userAgentMeta.model":"设备"}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.userAgentMeta.brands":"A,1"}})",
++      R"({"version":1,"enabled":true,"settings":{"network.proxy":"direct://"}})",
++      R"({"version":1,"enabled":true,"settings":{"network.proxy":"http://u:p@proxy:80"}})",
++      R"({"version":1,"enabled":true,"settings":{"network.proxy":"http://proxy:80/"}})",
++      R"({"version":1,"enabled":true,"settings":{"webrtc.private_ip":"01.2.3.4"}})",
++      R"({"version":1,"enabled":true,"settings":{"navigator.connection.type":"bad"}})",
++      std::string(32769, ' '),
++  };
++  for (const auto& json : invalid) {
++    CHECK(!ConfigureWebViewFingerprint(json).empty());
++    CHECK(GetWebViewFingerprintConfig() == first);
++  }
++  std::atomic<bool> stop = false;
++  std::vector<std::thread> readers;
++  for (int i = 0; i < 4; ++i) {
++    readers.emplace_back([&] {
++      while (!stop.load()) {
++        auto snapshot = GetWebViewFingerprintConfig();
++        CHECK(snapshot->enabled);
++        CHECK(snapshot->Find("chromium.navigator.hardwareConcurrency") == "8");
++      }
++    });
++  }
++  for (int i = 0; i < 100; ++i) {
++    CHECK(ConfigureWebViewFingerprint(valid).empty());
++  }
++  stop.store(true);
++  for (auto& reader : readers) {
++    reader.join();
++  }
++  CHECK(first->Find("chromium.navigator.hardwareConcurrency") == "8");
++  CHECK(ConfigureWebViewFingerprint(
++            R"({"version":1,"enabled":false,"settings":{}})")
++            .empty());
++  CHECK(!GetWebViewFingerprintConfig()->enabled);
++  CHECK(!GetWebViewFingerprintConfig()->Find(
++      "chromium.navigator.hardwareConcurrency"));
++  CHECK(first->enabled);  // Previously captured snapshots cannot be mutated.
++  CHECK(ConfigureWebViewFingerprint(valid).empty());
++  blink::FreezeWebViewFingerprint();
++  auto frozen = GetWebViewFingerprintConfig();
++  CHECK(!ConfigureWebViewFingerprint(valid).empty());
++  CHECK(GetWebViewFingerprintConfig() == frozen);
++  std::cout << "PASS schema, types, brands, proxy, atomic failure, "
++               "replacement, concurrent snapshots and freeze\n";
++  std::cout << frozen->serialized << '\n';
++}
+diff --git a/webview_custom/tests/network_identity_test.cc b/webview_custom/tests/network_identity_test.cc
+index 48ba2c9b7aeb6b65f6a83cf2791688de3434a85a..c2be65eecdcdb4f1cc226cf4e19088b4928a67e8 100644
+--- a/webview_custom/tests/network_identity_test.cc
++++ b/webview_custom/tests/network_identity_test.cc
+@@ -146,11 +146,9 @@ int main() {
+   assert(zero_port.proxy_config_ && !zero_port.proxy_is_valid_);
+   assert(android_webview::GetUserAgent() == "native");
+   set("chromium.enable", "1");
+-  set("chromium.navigator.useragent", "Mozilla/5.0 ");
+-  set("chromium.navigator.useragent2", "configured ");
+-  set("chromium.navigator.useragent3", "WebView");
++  set("chromium.navigator.useragent", "Mozilla/5.0 configured WebView");
+   assert(android_webview::GetUserAgent() == "Mozilla/5.0 configured WebView");
+-  set("chromium.navigator.useragent2", "bad\r\nInjected: yes");
++  set("chromium.navigator.useragent", "bad\r\nInjected: yes");
+   assert(android_webview::GetUserAgent() == "native");
+   set("chromium.network.proxy", "http://192.0.2.1:7890");
+   assert(WebViewPropertyOverrides().NetworkProxy() == "http://192.0.2.1:7890");
+diff --git a/webview_custom/tests/property_overrides_test.cc b/webview_custom/tests/property_overrides_test.cc
+index e5c8c30cce518d46d59ebae2882474fd9e9b74b9..f214e9e1a0d830791bf7434dad6896538328eb40 100644
+--- a/webview_custom/tests/property_overrides_test.cc
++++ b/webview_custom/tests/property_overrides_test.cc
+@@ -55,10 +55,9 @@ int main() {
+   set("boolean","0"); assert(WebViewPropertyOverrides().GetBool("boolean")==false);
+   set("boolean","true"); assert(WebViewPropertyOverrides().GetBool("boolean")==true);
+   set("boolean","nope"); assert(!WebViewPropertyOverrides().GetBool("boolean"));
+-  set("chromium.navigator.useragent","Mozilla/");
+-  set("chromium.navigator.useragent2","5.0 ");
+-  set("chromium.navigator.useragent3","test"); assert(WebViewPropertyOverrides().UserAgent()=="Mozilla/5.0 test");
+-  set("chromium.navigator.useragent2","\nbad"); assert(!WebViewPropertyOverrides().UserAgent());
++  set("chromium.navigator.useragent","Mozilla/5.0 test");
++  assert(WebViewPropertyOverrides().UserAgent()=="Mozilla/5.0 test");
++  set("chromium.navigator.useragent","\nbad"); assert(!WebViewPropertyOverrides().UserAgent());
+   set("brands","A,158&B,1"); assert(WebViewPropertyOverrides().Brands("brands").size()==2);
+   for (const char* invalid : {"broken","A,1&","A,1&B","A,1,2",",1","\xC3\xA9,1"}) {
+     set("brands",invalid); assert(WebViewPropertyOverrides().Brands("brands").empty());
+diff --git a/webview_custom/tests/review_regressions.cc b/webview_custom/tests/review_regressions.cc
+index d7de07dfd35285953fa00c0ef2547c8f9925e40e..84b6f33eb72c2ba477a837ac3edb8b576045eb46 100644
+--- a/webview_custom/tests/review_regressions.cc
++++ b/webview_custom/tests/review_regressions.cc
+@@ -125,7 +125,7 @@ int main(int argc,char** argv){
+     Set("chromium.navigator.userAgentMeta.model","bad\r\nvalue");
+     blink::UserAgentMetadata metadata;blink::ApplyUserAgentPropertyOverrides(metadata,false);
+     assert(metadata.model=="Pixel");
+-  } else if(test=="metadata-one-enable-read"){
++  } else if(test=="metadata-one-snapshot"){
+     blink::UserAgentMetadata metadata;reads.clear();
+     blink::ApplyUserAgentPropertyOverrides(metadata,false);
+     assert(reads["chromium.enable"]==1);

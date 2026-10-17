@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "enabled": true,
+  "settings": {
+    "navigator.hardwareConcurrency": 8,
+    "navigator.deviceMemory": 8,
+    "navigator.maxTouchPoints": 5,
+    "navigator.userAgentMeta.mobile": true,
+    "navigator.userAgentMeta.platform": "Android",
+    "config.x_requested_with": "",
+    "canvas.fillRectNoise": false
+  }
+}

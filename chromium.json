@@ -3,7 +3,7 @@
   "chromium_version": "158.0.8109.0",
   "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
   "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
-  "source_head": "1598a163cff1c3ed23c6406f8bcdded6cd4c06ea",
+  "source_head": "bf95d218bcae6441438511bea18b89c4aa2ad4a2",
   "target": {
     "os": "android",
     "cpu": "arm64",
@@ -70,7 +70,13 @@
       "source_commit": "1598a163cff1c3ed23c6406f8bcdded6cd4c06ea",
       "subject": "Coordinate WebView proxy routing, WebRTC policy and user agent identity",
       "sha256": "6106a739186486aed6ec05257095d3d1a1b024fcccd2a089ad9442741408d232"
+    },
+    {
+      "file": "patches/0011-bf95d218bc.patch",
+      "source_commit": "bf95d218bcae6441438511bea18b89c4aa2ad4a2",
+      "subject": "Replace Android property fingerprint input with a unified host JSON API",
+      "sha256": "abfcd11f41c1fbfc11f223bcd0a8bf0fea9fcb54153e79300961f19eba489f4e"
     }
   ],
-  "source_tree": "8944b1caec621d4e13dcb3ad50775bbdb19f5953"
+  "source_tree": "66226f12a833d09aec36bdd285fa72d5fe951626"
 }
