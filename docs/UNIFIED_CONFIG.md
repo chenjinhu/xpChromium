@@ -1,91 +1,85 @@
-# 统一指纹配置入口（version 1）
+# 启动文件指纹配置（version 1）
 
-本版本取消 Android `chromium.*` 系统属性读取。宿主 App 在 WebView 启动前调用一次 JSON 配置入口，浏览器、renderer、Worker 和网络侧使用同一份配置。旧 `setprop` 命令不再生效，APK 签名不影响配置能力。
+WebView 在宿主进程初始化时自动读取固定路径：
 
-## 宿主 App 接入
-
-把 [android/Fingerprint.java](../sdk/Fingerprint.java) 复制到宿主项目，在主线程、创建第一个 WebView 之前调用：
-
-```java
-import com.xpchromium.Fingerprint;
-
-// 可在 Application.onCreate 中执行，必须早于任何 WebView、预热、预取、
-// CookieManager、ServiceWorkerController 等可能启动 WebView 的调用。
-Fingerprint.configure(json);
-WebView webView = new WebView(context);
+```text
+/sdcard/xpChromium/fingerprint.json
 ```
 
-封装通过公开 API `WebView.getWebViewClassLoader()` 获取当前 provider，调用 `com.android.webview.chromium.FingerprintConfig.configure(String)`。不依赖隐藏 Android API、root、系统属性、共享文件或网页 JS 注入。只在安装本版本 xpChromium provider 时可用；宿主自身仍应遵循 WebView 的数据目录等初始化要求。
+宿主 App 无需调用配置方法，也无需集成 Java SDK。旧 `Fingerprint.configure(json)` 入口和系统属性输入均已移除。本版本通过这一个文件加载配置，浏览器、renderer、Worker 和网络侧共用同一份已校验快照。
 
-provider 方法返回空字符串表示成功，非空字符串表示拒绝原因；封装将拒绝转换为异常。调用过晚、安装了其他 provider 或配置有误时，应处理错误，不应忽略后继续当作已配置成功。宿主代码需由你集成，本仓库没有自动改写你的浏览器 App。
-
-## JSON 格式
+## 文件示例
 
 ```json
 {
   "version": 1,
   "enabled": true,
   "settings": {
-    "navigator.useragent": "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/158.0.0.0 Mobile Safari/537.36",
+    "navigator.useragent": "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/158.0.8109.0 Mobile Safari/537.36",
     "navigator.hardwareConcurrency": 8,
     "navigator.deviceMemory": 8,
     "navigator.maxTouchPoints": 5,
     "navigator.userAgentMeta.mobile": true,
     "navigator.userAgentMeta.platform": "Android",
-    "navigator.userAgentMeta.brands": [
-      {"brand": "Chromium", "version": "158"},
-      {"brand": "Android WebView", "version": "158"}
-    ],
     "config.x_requested_with": "",
     "canvas.fillRectNoise": false
   }
 }
 ```
 
-这是调用示例，不是自动生成的完整设备身份。UA 和 UA-CH 的关联值仍由调用方配套提供。
+保存为 UTF-8 JSON。完整示例见 [fingerprint.example.json](../examples/fingerprint.json)。三个顶层字段均为必填，不能增加其他顶层字段。`settings` 字段不带 `chromium.` 前缀，大小写敏感。数字 / 布尔值使用 JSON 原生类型，不能写成字符串。完整字段清单和范围见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
 
-三个顶层字段均为必填，不能增加其他顶层字段。`settings` 使用不带 `chromium.` 前缀的字段名，清单见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。字段名区分大小写。数字和布尔值使用 JSON 原生类型，不要写成字符串。
+## brands 自动生成
 
-- `navigator.useragent` 是一个完整字符串，不再使用 `useragent2` / `useragent3` 分段；最多 4096 字节。
-- brands / fullVersionList 使用 `[{"brand":"...","version":"..."}]` 数组，不再使用 `&` 拼接字符串。
-- `config.x_requested_with` 缺省为原生策略，`""` 删除，非空合法字符串替换。
-- `network.proxy` 缺省为原生网络；设置时必须是单个合法 `http://`、`https://` 或 `socks5://` URI。用户名密码认证尚未实现。
-- `canvas.fillRectNoise` 默认关闭；只有 `enabled:true` 且该项为 `true` 时开启旧 fillRect 噪声。上游运行时功能开关仍可进一步禁用。
-- 单项字符串最多 4096 字节，完整 JSON 最多 32768 字节。UA-CH 结构化字符串限制为可序列化 ASCII；数值沿用原实现范围。
+`navigator.userAgentMeta.brands`、`fullVersionList` 和 `fullVersion` 均可省略。启用定制时，默认和 AndroidX 自定义元数据路径均使用 Chromium 原生 `GenerateBrandVersionList`，保留 GREASE 和品牌排序规则。
+
+- 自定义 `navigator.useragent` 包含合法四段 `Chrome/版本` 时，自动跟随该版本。例如 `Chrome/157.0.8000.2` 生成主版本 `157` 和完整版本 `157.0.8000.2`。
+- 未配置 UA 或无法从 UA 解析合法四段版本时，使用实际内核版本，本次为 `158.0.8109.0`。
+- 自动生成 Chromium / Android WebView 品牌；不会把任意 UA 字符串推断成其他浏览器产品。
+- 显式传入 brands / fullVersionList / fullVersion 仍优先，调用方应确保这些手工值互相一致。
+- 低熵路径只生成主版本品牌，不补发高熵字段；原有 Client Hints 权限和按需发送规则保留。
+
+如果要手工覆盖，brands / fullVersionList 使用 `[{"brand":"...","version":"..."}]` 数组。
 
 ## SOCKS5 和恢复默认
 
-启用代理的最小配置：
+代理配置可以直接写入文件：
 
 ```json
 {"version":1,"enabled":true,"settings":{"network.proxy":"socks5://192.0.2.1:1080"}}
 ```
 
-示例地址必须替换为设备可达的代理。代理模式仍会禁止非代理 UDP、拒绝 WebTransport，并停用旧 ICE/SDP 文本改写。详见 [NETWORK_POLICY.md](NETWORK_POLICY.md)。无效代理 URI 在配置入口被拒绝，当前已接受的整份配置保持不变。
+把示例地址换成设备可达的代理；也支持单个 `http://` / `https://` 端点，尚不支持用户名密码认证。省略 network.proxy 时使用原生网络。代理模式会限制非代理 UDP、拒绝 WebTransport 并停用旧 ICE/SDP 文本改写，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md)。
 
-启动前恢复配置默认值：
+恢复默认配置，可以删除文件，或保存：
 
 ```json
 {"version":1,"enabled":false,"settings":{}}
 ```
 
-未调用入口时也使用这个默认配置。它关闭迁移的字段覆盖、代理和 Canvas 扰动；既有 Window/document/navigator 的 IDL 定制仍保留，不代表整个 APK 回到官方未修改版。
+这会关闭字段覆盖、定制代理和 Canvas 扰动；早期 Window/document/navigator 的 IDL 定制仍保留。
 
-## 生命周期和一致性
+## 加载时机和失败处理
 
-配置按宿主进程管理，当前不能给同一进程的多个 WebView Profile 分别设置。不同宿主进程必须分别配置。
+- 宿主浏览器进程加载 WebView 原生库并完成 JNI 初始化后立即读取一次，再冻结配置；早于后续浏览器启动和网络上下文创建。renderer 不访问外部存储，只接收浏览器传递的快照。
+- 文件必须是普通文件，大小为 1..32768 字节。按一个文件描述符读取，限制最大读入大小；目录、FIFO、空文件和超大文件被拒绝。单项字符串最多 4096 字节。
+- 文件不存在：保留默认配置，记录 INFO；不会创建目录或示例文件。
+- 无读取权限、读取失败、内容非法、字段未知或数值越界：整份拒绝，保持默认配置并记录 ERROR，不输出配置内容。若文件里的代理配置有误，整份文件不会生效。
+- 配置在进程中保持不变。修改或创建文件后，必须完整退出并重启宿主 App；只刷新页面或重启 renderer 不会重新读取。
+- 建议用临时文件写完后原子替换正式文件，避免启动正好读到写入中的内容。
+- 当前作用范围为宿主进程。不同宿主进程读取同一路径，并各自保存启动时快照；尚不能为同一进程的多个 WebView Profile 指定独立文件。
 
-入口会先完成整份校验，再原子替换快照；失败不改变已接受的配置。启动前再次成功调用是整份替换，不是字段合并。省略字段使用原生行为，删除旧字段时不要依赖上次调用的内容。
+## Android 存储权限
 
-浏览器进入启动阶段时冻结配置；读取网络策略也会冻结。之后的修改明确失败，需完整重启宿主进程再设置。提前读取默认 UA 不冻结配置；但已经缓存 UA 的宿主代码需要在配置后重新读取。
+WebView 内核运行在宿主 App 的 UID 下，读取此路径使用宿主的权限。Android 10 的外部存储规则以及 Android 11+ 的分区存储限制可能阻止读取共享目录内的 JSON；普通媒体读取权限通常不能授予任意 JSON 文件访问。
 
-renderer 启动参数携带已验证 JSON 的 Base64 编码，启动时先安装快照，再创建页面；同一 renderer 的 Worker 共享不可变快照。新 renderer / renderer 重建复用相同配置。单进程模式直接共享浏览器快照。Base64 只用于传输编码，请勿把密码或令牌放进指纹配置。
+对于 Android 11+，通常需要宿主具备适用的“所有文件访问权限”或目标 ROM 已授予相应目录访问能力；目标 Android 版本、targetSdk 和 ROM 策略需在设备上确认。给 WebView provider APK 加权限或使用 RK14 签名，不能自动赋予宿主此权限。程序不会绕过权限检查，也不会自动弹窗申请。文件读取权限应在首次初始化 WebView 前准备好。
 
-网页没有这个入口，也没有通过 `addJavascriptInterface` 暴露任何配置能力。配置只在本次宿主进程中生效，不自动写文件保存。
+可在 logcat 中检索 `Loaded fingerprint configuration`、`No fingerprint configuration file` 或 `Fingerprint file was not applied` 判断加载结果。日志显示加载成功也不等于全部页面和网络行为已经验证。
 
 ## 验证
 
-`webview_custom:fingerprint_config_test` 编译实际配置生产实现，使用 Chromium JSON、URL 与锁，覆盖默认值、类型和范围、非法字段、brands、代理格式、失败不改配置、整份替换、并发快照读取、冻结和新进程导入。
+实际 Chromium 配置 / 文件集成测试：
 
 ```sh
 gn gen out/Fingerprint-host --root-target=//webview_custom:fingerprint_config_test \
@@ -94,6 +88,6 @@ autoninja -C out/Fingerprint-host -j 16 fingerprint_config_test
 out/Fingerprint-host/fingerprint_config_test
 ```
 
-既有 `test_properties.py`、`test_review_regressions.py`、`test_network_identity.py` 验证生产 getter / 方法体，配置存储边界使用内存适配器；不再把它们当作 Bionic 属性服务测试。APK 构建验证 Java/JNI 注册、原生类型和链接。真实宿主调用、renderer/Worker 页面结果及设备网络仍需真机端到端测试。
+覆盖文件缺失、正常读取、空文件、大小上限、目录、FIFO、权限拒绝、非法 JSON，以及配置原子拒绝、并发快照、冻结和新进程导入。`test_auto_brands.py` 执行实际 UA 版本解析和元数据策略方法，类型与上游品牌生成函数边界使用适配器；原生品牌函数与 Java/JNI 自动入口由 APK 编译 / 链接检查。
 
-`smoke.html` 默认按 fillRect 噪声关闭检查；在统一配置显式启用该项时，加载 `smoke.html?noise=on` 检查噪声模式。
+既有配置 / 请求头、9 项方法回归、网络身份和 81 种 Canvas 组合测试继续保留。宿主实际启动读取、Android 存储权限、页面 / Worker 结果及代理出口仍需真机验证。`smoke.html` 默认按 fillRect 噪声关闭检查；显式开启时加载 `smoke.html?noise=on`。

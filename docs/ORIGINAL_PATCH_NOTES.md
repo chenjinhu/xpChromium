@@ -1,6 +1,6 @@
-# 统一指纹配置版本
+# 启动文件指纹配置版本
 
-本版本使用宿主 App 的 JSON 统一入口，已取消 Android 系统属性读取。接入代码、字段、生命周期及 SOCKS5 用法见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。默认不启用字段覆盖、代理或 Canvas 扰动；旧 Window IDL 定制保留。以下为早期迁移记录，其中旧的默认噪声行为已由统一入口取代。
+WebView 初始化时自动读取 `/sdcard/xpChromium/fingerprint.json`。不需要宿主主动调用方法，已经取消系统属性输入和 Java configure API。文件格式、存储权限及自动 brands 规则见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。默认关闭字段覆盖、代理和 Canvas 扰动；旧 Window IDL 定制保留。以下为早期迁移记录，其中旧的默认噪声行为已由统一配置取代。
 
 # Chromium WebView 自定义补丁
 

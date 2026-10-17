@@ -3,7 +3,7 @@
   "chromium_version": "158.0.8109.0",
   "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
   "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
-  "source_head": "bf95d218bcae6441438511bea18b89c4aa2ad4a2",
+  "source_head": "ac5ae14b50b7a5e8c281b56664d4eef416ec528a",
   "target": {
     "os": "android",
     "cpu": "arm64",
@@ -76,7 +76,13 @@
       "source_commit": "bf95d218bcae6441438511bea18b89c4aa2ad4a2",
       "subject": "Replace Android property fingerprint input with a unified host JSON API",
       "sha256": "abfcd11f41c1fbfc11f223bcd0a8bf0fea9fcb54153e79300961f19eba489f4e"
+    },
+    {
+      "file": "patches/0012-ac5ae14b50.patch",
+      "source_commit": "ac5ae14b50b7a5e8c281b56664d4eef416ec528a",
+      "subject": "Load fingerprint JSON automatically at startup and generate default UA brands",
+      "sha256": "22d561d2784cf7b6742f26dfd667f3d660ce2fb99c8d0504a712d9085a9531d9"
     }
   ],
-  "source_tree": "66226f12a833d09aec36bdd285fa72d5fe951626"
+  "source_tree": "9c7cb346b427311df3ca79047f55520e07aaba18"
 }

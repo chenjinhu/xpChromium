@@ -4,14 +4,14 @@
 
 ## 配置
 
-本版本已取消系统属性读取。使用宿主 App 的 `Fingerprint.configure(json)` 统一入口，调用必须早于 WebView 启动；完整格式和生命周期见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。以下字段均放在 `settings` 对象内，不带 `chromium.` 前缀。数字 / 布尔值使用 JSON 原生类型。未知字段、类型错误或越界使整份配置失败，旧配置保持不变。
+本版本已取消系统属性读取。启动时自动读取 `/sdcard/xpChromium/fingerprint.json`；完整格式、权限和生命周期见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。以下字段均放在 `settings` 对象内，不带 `chromium.` 前缀。数字 / 布尔值使用 JSON 原生类型。未知字段、类型错误或越界使整份配置失败，旧配置保持不变。
 
 | settings 字段 | 用途及格式 |
 | --- | --- |
 | config.x_requested_with | 未设置：原生包名策略；非空合法字符串：替换；空字符串：删除 |
 | network.proxy | 进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。入口拒绝非法 URI，修改需重启宿主进程，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
 | navigator.useragent | 完整 HTTP / JS UA 字符串，最多 4096 字节；拒绝非法控制字符。不再分段 |
-| navigator.userAgentMeta.brands / fullVersionList | `[{"brand":"Chromium","version":"158"}]` 数组；完整版本列表单独配置 |
+| navigator.userAgentMeta.brands / fullVersionList | 可省略并自动生成；手动覆盖使用 `[{"brand":"Chromium","version":"158"}]` 数组，完整版本列表单独配置 |
 | navigator.userAgentMeta.mobile / wow64 | JSON 布尔值 true/false |
 | navigator.userAgentMeta.platform / platformVersion / architecture / model / fullVersion / bitness | UA-CH 字段，要求可序列化的 ASCII；保留高熵提示权限策略与按需发送规则 |
 | navigator.productSub / vendor / platform | JS Navigator 字符串，含继承自 NavigatorID 的字段 |

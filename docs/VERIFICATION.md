@@ -1,5 +1,24 @@
 # 构建验证记录
 
+## 启动自动读取文件与 brands 自动生成
+
+- 源码提交：`ac5ae14b50b7a5e8c281b56664d4eef416ec528a`。
+- 最终源码树：`9c7cb346b427311df3ca79047f55520e07aaba18`。
+- 完整 APK 构建完成：2026-10-17 22:32:26（UTC+8）。
+- 宿主进程初始化 WebView 时读取 `/sdcard/xpChromium/fingerprint.json` 并冻结快照；旧公开 Java 配置 API / SDK 已移除，生产代码无系统属性读取。
+- 未填写 brands / fullVersionList / fullVersion 时，默认与 AndroidX 元数据路径按合法 UA Chrome 四段版本或真实内核版本自动生成；显式配置仍优先，保留低熵规则。
+- 实际 Chromium 文件读取 / 配置存储集成测试通过，覆盖缺失、正常、空文件、超大文件、目录、FIFO、权限拒绝、非法 JSON，以及失败原子保留、并发快照、冻结和新进程导入。
+- 自动 brands 测试使用实际 UA 解析与元数据策略方法，上游品牌生成和类型边界使用适配器；ASan / UBSan 通过。原生品牌生成 API 在最终 APK 中编译 / 链接通过。
+- 既有配置 / 请求头、9 项方法回归、网络策略及 81 种 fillRect 组合检查通过；10 个变更 C++ 文件依赖检查通过。
+- 直接解析最终构建 APK DEX，确认旧公开 FingerprintConfig 类和 AwFingerprintConfig.configure 方法不再存在。
+- 全部 12 个补丁在独立临时 Git 索引逐个应用，每一步的源码树均与原始提交一致，最终与已编译版本一致。
+- 使用用户提供的 RK14 证书在本机签名，私钥未传输；v2 / v3、包名、最低 SDK 29、arm64、16 KiB ZIP / ELF 对齐、ZIP 完整性和签名前后 CRC / 大小一致性校验通过。
+- APK：`SystemWebView-158.0.8109.0-arm64-file-config-rk14.apk`，329075867 字节。
+- SHA-256：`7cc7fbc56f49222ccd6eb36c8996da7197b6eabb907cbf01bdc92e9ba4fb7718`。
+- 证书 SHA-256：`cf2ab3818595c4eda08cec72bbe39bc377a30b764a3eebde52536eae01808525`。
+- 尚未完成真机安装、Android 存储权限、宿主启动读取、页面 / Worker 和代理抓包验证。文件读取使用宿主 App UID 的权限；Android 11+ 的分区存储可能阻止该路径访问，provider 签名不赋予宿主权限。
+- 修改配置后需完整重启宿主 App。详见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。
+
 ## 统一 JSON 配置入口
 
 - 源码提交：`bf95d218bcae6441438511bea18b89c4aa2ad4a2`。
@@ -14,7 +33,7 @@
 - APK ZIP 完整性、包名、最低 SDK 29、arm64、16 KiB 对齐及 RK14 v2 / v3 签名校验通过；签名前后 ZIP CRC 和大小一致，签名临时材料已清理。
 - APK：`SystemWebView-158.0.8109.0-arm64-unified-rk14.apk`，329075867 字节。
 - SHA-256：`b8c21a39baaca59df76d98f0218f4be7b30b7d8e66daa18caa1f3b322ca0878f`。
-- 未完成真机宿主 API 调用、页面 / Worker 端到端及代理抓包测试。宿主 App 需集成 [Fingerprint.java](../sdk/Fingerprint.java)，旧 setprop 在新版本中不再生效。
+- 未完成真机宿主 API 调用、页面 / Worker 端到端及代理抓包测试。本节对应旧版宿主 Java API，后续版本已改为启动文件读取；旧 setprop 不再生效。
 
 ## 网络策略升级
 
