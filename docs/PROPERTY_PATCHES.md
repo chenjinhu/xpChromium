@@ -21,6 +21,7 @@ setprop chromium.enable 0
 | 属性（均以 chromium. 开头） | 用途及格式 |
 | --- | --- |
 | config.x_requested_with | 未设置或 `-`：原生包名策略；非空：强制替换；显式空字符串：删除，示例 `setprop chromium.config.x_requested_with ''` |
+| network.proxy | 新增进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。非法非空配置阻断代理请求，修改后重启 App，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
 | navigator.useragent / useragent2 / useragent3 | 按顺序拼接 HTTP / JS UA，首段必须非空；拒绝控制字符。每段受 Android 属性长度限制 |
 | navigator.userAgentMeta.brands / fullVersionList | `Chromium,158&Android WebView,158` 格式，完整版本单独配置，拒绝不完整条目 |
 | navigator.userAgentMeta.mobile / wow64 | 0/1 或 false/true |
@@ -44,8 +45,8 @@ setprop chromium.enable 0
 | navigator.connection.effectiveType | slow-2g/2g/3g/4g，按 IDL 校验 |
 | navigator.connection.downlinkMax / downlink | 有限数 0..1e9（Mbps） |
 | navigator.connection.rtt | 整数 0..2147483647（毫秒） |
-| webrtc.public_ip / private_ip | 有效 IPv4；替换 ICE candidate/address/relatedAddress/toJSON 的报告值，保留端口和 raddr/rport 结构；IPv6/mDNS 保持原样，不改变真实网络出口 |
-| webrtc.sdp_redact | 新增独立开关；true/1 时移除 SDP candidate 行并将 c=IN IP4 置为 0.0.0.0。默认不做；可能影响复制 SDP 建立连接 |
+| webrtc.public_ip / private_ip | 有效 IPv4；替换 ICE candidate/address/relatedAddress/toJSON 的报告值，保留端口和 raddr/rport 结构；IPv6/mDNS 保持原样，不改变真实网络出口。network.proxy 启用时不做文本改写 |
+| webrtc.sdp_redact | 独立开关；true/1 时移除 SDP candidate 行并将 c=IN IP4 置为 0.0.0.0。默认不做；可能影响复制 SDP 建立连接。network.proxy 启用时不做文本改写 |
 | audio.randomDouble | 有限配置数，0 关闭；每个声道首次有效 JavaScript 读取统一处理一次，内部播放、卷积与清零不会触发加噪，增量 clamp(seed*0.123, -1e-5, 1e-5)，保留零和非有限样本；两种读取接口共享数据 |
 | webgl.unmasked_vendor / unmasked_renderer | 仅修改 WEBGL_debug_renderer_info 解锁后的字符串；保留扩展及 context-lost 检查，不改变真实 GPU |
 | canvas.toDataUrl.randomDouble | 有限配置数，0 关闭；通过 seed 位混合选择起点，扫描实际像素寻找不透明的 8-bit RGBA/BGRA 像素，仅找到时复制并翻转一个颜色位后编码。跳过行填充；无候选像素不分配副本。保持原画布及编码格式；不影响 toBlob/getImageData |

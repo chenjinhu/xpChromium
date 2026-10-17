@@ -40,3 +40,7 @@ CHROMIUM_WEBVIEW_BUILD_ONLY=1 /home/qiled/chromium-android-latest/run-webview-bu
 系统属性配置与逐项迁移说明见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
 
 代码质量修复后的配置实现位于 `third_party/blink/common/webview/property_overrides.cc`，浏览器侧统一处理 UA 元数据。回归命令和行为细节见 PROPERTY_PATCHES.md。
+
+## 网络策略升级
+
+[NETWORK_POLICY.md](NETWORK_POLICY.md) 说明可配置的真实代理、WebRTC 路由限制、WebTransport 处理及 UA 入口统一。默认保持原生网络；修改启动策略后需要完整重启宿主 App。当前为进程级配置，真机网络验证尚未完成。

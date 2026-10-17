@@ -1,0 +1,832 @@
+From 1598a163cff1c3ed23c6406f8bcdded6cd4c06ea Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sat, 17 Oct 2026 16:37:11 +0800
+Subject: [PATCH] Coordinate WebView proxy routing, WebRTC policy and user
+ agent identity
+
+
+diff --git a/android_webview/browser/BUILD.gn b/android_webview/browser/BUILD.gn
+index 736873292e51989f7c63124a1720ebe22afee3e3..aad3bdddfaa852fdb900ed99edcf8ca0f24028ea 100644
+--- a/android_webview/browser/BUILD.gn
++++ b/android_webview/browser/BUILD.gn
+@@ -182,6 +182,8 @@ source_set("browser") {
+     "network_service/aw_network_change_notifier.h",
+     "network_service/aw_network_change_notifier_factory.cc",
+     "network_service/aw_network_change_notifier_factory.h",
++    "network_service/aw_network_property_policy.cc",
++    "network_service/aw_network_property_policy.h",
+     "network_service/aw_proxy_config_monitor.cc",
+     "network_service/aw_proxy_config_monitor.h",
+     "network_service/aw_proxying_restricted_cookie_manager.cc",
+diff --git a/android_webview/browser/aw_content_browser_client.cc b/android_webview/browser/aw_content_browser_client.cc
+index 049ad57064a29d6950384caba89c6bfb1d23386f..f219741fdf7072879d765d8238a3b723a83bb698 100644
+--- a/android_webview/browser/aw_content_browser_client.cc
++++ b/android_webview/browser/aw_content_browser_client.cc
+@@ -36,6 +36,7 @@
+ #include "android_webview/browser/cookie_manager.h"
+ #include "android_webview/browser/http_headers/aw_origin_matched_header.h"
+ #include "android_webview/browser/network_service/aw_browser_context_io_thread_handle.h"
++#include "android_webview/browser/network_service/aw_network_property_policy.h"
+ #include "android_webview/browser/network_service/aw_proxy_config_monitor.h"
+ #include "android_webview/browser/network_service/aw_proxying_restricted_cookie_manager.h"
+ #include "android_webview/browser/network_service/aw_proxying_url_loader_factory.h"
+@@ -131,6 +132,7 @@
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "net/android/network_library.h"
+ #include "net/base/features.h"
++#include "net/base/net_errors.h"
+ #include "net/base/url_util.h"
+ #include "net/cookies/cookie_setting_override.h"
+ #include "net/cookies/site_for_cookies.h"
+@@ -147,12 +149,14 @@
+ #include "services/network/public/mojom/cookie_manager.mojom-forward.h"
+ #include "services/network/public/mojom/fetch_api.mojom.h"
+ #include "services/network/public/mojom/network_context.mojom.h"
++#include "services/network/public/mojom/web_transport.mojom.h"
+ #include "services/service_manager/public/cpp/binder_registry.h"
+ #include "services/service_manager/public/cpp/interface_provider.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
+ #include "third_party/blink/public/common/loader/url_loader_throttle.h"
+ #include "third_party/blink/public/common/navigation/preloading_headers.h"
+ #include "third_party/blink/public/common/web_preferences/web_preferences.h"
++#include "third_party/blink/public/common/webview/property_overrides.h"
+ #include "ui/base/resource/resource_bundle.h"
+ #include "ui/base/resource/resource_bundle_android.h"
+ #include "ui/display/util/display_util.h"
+@@ -220,6 +224,10 @@ std::string GetProduct() {
+ }
+ 
+ std::string GetUserAgent() {
++  if (auto value = blink::WebViewPropertyOverrides().UserAgent()) {
++    return *value;
++  }
++
+   // "Version/4.0" had been hardcoded in the legacy WebView.
+   std::string product = "Version/4.0 " + GetProduct();
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+@@ -244,6 +252,28 @@ std::string GetUserAgent() {
+       product, "; wv", embedder_support::IncludeAndroidBuildNumber::Include);
+ }
+ 
++void AwContentBrowserClient::WillCreateWebTransport(
++    int process_id,
++    int frame_routing_id,
++    const GURL& url,
++    const url::Origin& initiator_origin,
++    mojo::PendingRemote<network::mojom::WebTransportHandshakeClient>
++        handshake_client,
++    WillCreateWebTransportCallback callback) {
++  if (AwNetworkPropertyPolicy::Get().ShouldBlockWebTransport()) {
++    auto error = network::mojom::WebTransportError::New();
++    error->net_error = net::ERR_BLOCKED_BY_CLIENT;
++    error->details =
++        "WebTransport is unavailable with a configured WebView proxy.";
++    error->safe_to_report_details = true;
++    std::move(callback).Run(std::move(handshake_client), std::move(error));
++    return;
++  }
++  content::ContentBrowserClient::WillCreateWebTransport(
++      process_id, frame_routing_id, url, initiator_origin,
++      std::move(handshake_client), std::move(callback));
++}
++
+ // TODO(yirui): can use similar logic as in PrependToAcceptLanguagesIfNecessary
+ // in chrome/browser/android/preferences/pref_service_bridge.cc
+ // static
+diff --git a/android_webview/browser/aw_content_browser_client.h b/android_webview/browser/aw_content_browser_client.h
+index 030df8e504db7b04645980ff6547c3b13950fc59..dfd76939e2cc4838f33d0bb4a30fd95dd2584567 100644
+--- a/android_webview/browser/aw_content_browser_client.h
++++ b/android_webview/browser/aw_content_browser_client.h
+@@ -265,6 +265,15 @@ class AwContentBrowserClient : public content::ContentBrowserClient {
+       override;
+   std::string GetProduct() override;
+   std::string GetUserAgent() override;
++
++  void WillCreateWebTransport(
++      int process_id,
++      int frame_routing_id,
++      const GURL& url,
++      const url::Origin& initiator_origin,
++      mojo::PendingRemote<network::mojom::WebTransportHandshakeClient>
++          handshake_client,
++      WillCreateWebTransportCallback callback) override;
+   // Override GetUserAgentMetadata API for ContentBrowserClient, it helps
+   // LocalFrameClient get the default user-agent metadata if user-agent isn't
+   // overridden. If Android WebView overrides the user-agent metadata when
+diff --git a/android_webview/browser/aw_settings.cc b/android_webview/browser/aw_settings.cc
+index 3d08b285991974b5ab67939962c4fbbde34270dc..f6e1e50dbc7316422c0496cbb42cf6a70020666d 100644
+--- a/android_webview/browser/aw_settings.cc
++++ b/android_webview/browser/aw_settings.cc
+@@ -16,6 +16,7 @@
+ #include "android_webview/browser/aw_user_agent_metadata.h"
+ #include "android_webview/browser/metrics/aw_metrics_service_accessor.h"
+ #include "android_webview/browser/metrics/aw_metrics_service_client.h"
++#include "android_webview/browser/network_service/aw_network_property_policy.h"
+ #include "android_webview/browser/renderer_host/aw_render_view_host_ext.h"
+ #include "android_webview/common/aw_content_client.h"
+ #include "android_webview/common/aw_features.h"
+@@ -39,6 +40,7 @@
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_property_overrides.h"
++#include "third_party/blink/public/common/webview/property_overrides.h"
+ #include "third_party/blink/public/mojom/webpreferences/web_preferences.mojom.h"
+ #include "third_party/jni_zero/default_conversions.h"
+ #include "url/gurl.h"
+@@ -216,6 +218,11 @@ void AwSettings::UpdateUserAgentLocked(JNIEnv* env,
+ 
+   std::optional<std::string> ua_string_override =
+       Java_AwSettings_getUserAgentLocked(env, obj);
++  // Match the configured HTTP header, default UA and renderer/worker identity
++  // at the WebContents source, including apps with their own UA override.
++  if (auto configured_ua = blink::WebViewPropertyOverrides().UserAgent()) {
++    ua_string_override = std::move(configured_ua);
++  }
+   bool ua_overidden = ua_string_override.has_value();
+   bool ua_metadata_overridden =
+       Java_AwSettings_getHasUserAgentMetadataOverridesLocked(env, obj);
+@@ -331,6 +338,8 @@ void AwSettings::UpdateRendererPreferencesLocked(JNIEnv* env,
+     update_prefs = true;
+   }
+ 
++  update_prefs |= AwNetworkPropertyPolicy::Get().ApplyWebRtcPolicy(*prefs);
++
+   if (!prefs->uses_platform_autofill) {
+     prefs->uses_platform_autofill = true;
+     update_prefs = true;
+diff --git a/android_webview/browser/network_service/aw_network_property_policy.cc b/android_webview/browser/network_service/aw_network_property_policy.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..46a4eb482b1d4d3a44d203ac0c1ed56b67af8c0e
+--- /dev/null
++++ b/android_webview/browser/network_service/aw_network_property_policy.cc
+@@ -0,0 +1,76 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "android_webview/browser/network_service/aw_network_property_policy.h"
++
++#include <algorithm>
++#include <string_view>
++
++#include "base/no_destructor.h"
++#include "net/base/proxy_string_util.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
++#include "third_party/blink/public/common/webview/property_overrides.h"
++
++namespace android_webview {
++
++const AwNetworkPropertyPolicy& AwNetworkPropertyPolicy::Get() {
++  static const base::NoDestructor<AwNetworkPropertyPolicy> policy(
++      blink::WebViewPropertyOverrides().NetworkProxy());
++  return *policy;
++}
++
++AwNetworkPropertyPolicy::AwNetworkPropertyPolicy(
++    std::optional<std::string> proxy_uri) {
++  if (!proxy_uri) {
++    return;
++  }
++
++  auto& rules = proxy_config_.emplace().proxy_rules();
++  rules.type = net::ProxyConfig::ProxyRules::Type::PROXY_LIST;
++  // In pinned proxy mode, even loopback/link-local URLs must not silently
++  // bypass the proxy. There are no bypass rules or DIRECT fallback entries.
++  rules.bypass_rules.AddRulesToSubtractImplicit();
++  proxy_is_valid_ = false;
++
++  const std::string_view uri = *proxy_uri;
++  if (!uri.starts_with("http://") && !uri.starts_with("https://") &&
++      !uri.starts_with("socks5://")) {
++    return;
++  }
++  const auto authority = uri.substr(uri.find("://") + 3);
++  if (authority.empty() ||
++      authority.find_first_of("/@?#\\,;=") != std::string_view::npos ||
++      !std::all_of(authority.begin(), authority.end(),
++                   [](unsigned char c) { return c > 32 && c < 127; })) {
++    return;
++  }
++
++  // Use Chromium's native parser for hostname, IPv6 and port validation.
++  net::ProxyChain chain =
++      net::ProxyUriToProxyChain(uri, net::ProxyServer::SCHEME_HTTP);
++  if (!chain.is_single_proxy() || chain.First().host_port_pair().port() == 0) {
++    return;
++  }
++  rules.single_proxies.SetSingleProxyChain(chain);
++  proxy_is_valid_ = true;
++}
++
++AwNetworkPropertyPolicy::~AwNetworkPropertyPolicy() = default;
++
++bool AwNetworkPropertyPolicy::ApplyWebRtcPolicy(
++    blink::RendererPreferences& prefs) const {
++  if (!proxy_config_) {
++    return false;
++  }
++  constexpr auto policy =
++      blink::mojom::WebRtcIpHandlingPolicy::kDisableNonProxiedUdp;
++  const bool changed = prefs.webrtc_ip_handling_policy != policy ||
++                       !prefs.webrtc_ip_handling_urls.empty();
++  prefs.webrtc_ip_handling_policy = policy;
++  // Per-origin exceptions must not relax the selected proxy's routing policy.
++  prefs.webrtc_ip_handling_urls.clear();
++  return changed;
++}
++
++}  // namespace android_webview
+diff --git a/android_webview/browser/network_service/aw_network_property_policy.h b/android_webview/browser/network_service/aw_network_property_policy.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b867b2d40b425714f986ddcfb7fd93d297d596d
+--- /dev/null
++++ b/android_webview/browser/network_service/aw_network_property_policy.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef ANDROID_WEBVIEW_BROWSER_NETWORK_SERVICE_AW_NETWORK_PROPERTY_POLICY_H_
++#define ANDROID_WEBVIEW_BROWSER_NETWORK_SERVICE_AW_NETWORK_PROPERTY_POLICY_H_
++
++#include <optional>
++#include <string>
++
++#include "net/proxy_resolution/proxy_config.h"
++
++namespace blink {
++struct RendererPreferences;
++}
++
++namespace android_webview {
++
++// Browser-process startup policy shared by every WebView NetworkContext and
++// renderer preference update. Changing it requires restarting the host app.
++class AwNetworkPropertyPolicy {
++ public:
++  static const AwNetworkPropertyPolicy& Get();
++
++  // nullopt keeps native networking. A configured but invalid endpoint creates
++  // an empty PROXY_LIST, so requests fail instead of falling back to DIRECT.
++  explicit AwNetworkPropertyPolicy(std::optional<std::string> proxy_uri);
++  ~AwNetworkPropertyPolicy();
++
++  const std::optional<net::ProxyConfig>& proxy_config() const {
++    return proxy_config_;
++  }
++  bool proxy_is_valid() const { return proxy_is_valid_; }
++  bool ApplyWebRtcPolicy(blink::RendererPreferences& prefs) const;
++  bool ShouldBlockWebTransport() const { return proxy_config_.has_value(); }
++
++ private:
++  std::optional<net::ProxyConfig> proxy_config_;
++  bool proxy_is_valid_ = true;
++};
++
++}  // namespace android_webview
++
++#endif  // ANDROID_WEBVIEW_BROWSER_NETWORK_SERVICE_AW_NETWORK_PROPERTY_POLICY_H_
+diff --git a/android_webview/browser/network_service/aw_network_property_policy_unittest.cc b/android_webview/browser/network_service/aw_network_property_policy_unittest.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..490c925474881a413adc508bf44f2695d2f0e8c5
+--- /dev/null
++++ b/android_webview/browser/network_service/aw_network_property_policy_unittest.cc
+@@ -0,0 +1,108 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "android_webview/browser/network_service/aw_network_property_policy.h"
++
++#include "mojo/public/cpp/test_support/test_utils.h"
++#include "net/base/net_errors.h"
++#include "net/log/net_log_with_source.h"
++#include "net/proxy_resolution/proxy_config_with_annotation.h"
++#include "net/proxy_resolution/proxy_info.h"
++#include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
++#include "services/network/public/cpp/proxy_config_mojom_traits.h"
++#include "services/network/public/mojom/proxy_config_with_annotation.mojom.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
++#include "url/gurl.h"
++
++namespace android_webview {
++namespace {
++
++TEST(AwNetworkPropertyPolicyTest, NativePreservesPreferences) {
++  AwNetworkPropertyPolicy policy(std::nullopt);
++  EXPECT_FALSE(policy.proxy_config());
++  EXPECT_FALSE(policy.ShouldBlockWebTransport());
++  blink::RendererPreferences prefs;
++  prefs.webrtc_ip_handling_policy =
++      blink::mojom::WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly;
++  EXPECT_FALSE(policy.ApplyWebRtcPolicy(prefs));
++  EXPECT_EQ(prefs.webrtc_ip_handling_policy,
++            blink::mojom::WebRtcIpHandlingPolicy::kDefaultPublicInterfaceOnly);
++}
++
++TEST(AwNetworkPropertyPolicyTest, RoutesAllProtocolsAndLoopback) {
++  for (const char* endpoint :
++       {"http://192.0.2.1:7890", "https://proxy.example:443",
++        "socks5://[2001:db8::1]:1080"}) {
++    SCOPED_TRACE(endpoint);
++    AwNetworkPropertyPolicy policy(endpoint);
++    ASSERT_TRUE(policy.proxy_is_valid());
++    ASSERT_TRUE(policy.proxy_config());
++    for (const char* url :
++         {"http://example.test/", "https://example.test/", "ws://example.test/",
++          "wss://example.test/", "http://127.0.0.1/", "http://[::1]/",
++          "http://169.254.1.2/"}) {
++      SCOPED_TRACE(url);
++      net::ProxyInfo info;
++      policy.proxy_config()->proxy_rules().Apply(GURL(url), &info);
++      ASSERT_FALSE(info.is_empty());
++      EXPECT_FALSE(info.is_direct());
++      EXPECT_EQ(info.proxy_chain().length(), 1u);
++      EXPECT_EQ(info.proxy_list().size(), 1u);
++      EXPECT_FALSE(info.Fallback(net::ERR_PROXY_CONNECTION_FAILED,
++                                 net::NetLogWithSource()));
++      EXPECT_TRUE(info.is_empty());
++    }
++  }
++}
++
++TEST(AwNetworkPropertyPolicyTest, InvalidConfigurationNeverBecomesDirect) {
++  for (const char* endpoint :
++       {"direct://", "proxy.example:7890", "socks4://proxy.example:1080",
++        "http://user:password@proxy.example:7890", "http://proxy.example/path",
++        "http://proxy.example:7890,direct://", "http=proxy.example:7890",
++        "http://proxy.example:0", "http://proxy.example:99999",
++        "http://proxy.example:no", "http://proxy.example:7890\n", "http://",
++        "http://proxy.example?query", "http://proxy.example#ref"}) {
++    SCOPED_TRACE(endpoint);
++    AwNetworkPropertyPolicy policy(endpoint);
++    ASSERT_TRUE(policy.proxy_config());
++    EXPECT_FALSE(policy.proxy_is_valid());
++    EXPECT_TRUE(policy.ShouldBlockWebTransport());
++    for (const char* url : {"https://example.test/", "http://localhost/"}) {
++      net::ProxyInfo info;
++      policy.proxy_config()->proxy_rules().Apply(GURL(url), &info);
++      EXPECT_TRUE(info.is_empty());
++    }
++  }
++}
++
++TEST(AwNetworkPropertyPolicyTest, ProxyRestrictsWebRtcAndRemovesExceptions) {
++  AwNetworkPropertyPolicy policy("http://192.0.2.1:7890");
++  blink::RendererPreferences prefs;
++  prefs.webrtc_ip_handling_urls.emplace_back();
++  EXPECT_TRUE(policy.ApplyWebRtcPolicy(prefs));
++  EXPECT_EQ(prefs.webrtc_ip_handling_policy,
++            blink::mojom::WebRtcIpHandlingPolicy::kDisableNonProxiedUdp);
++  EXPECT_TRUE(prefs.webrtc_ip_handling_urls.empty());
++  EXPECT_FALSE(policy.ApplyWebRtcPolicy(prefs));
++  EXPECT_TRUE(policy.ShouldBlockWebTransport());
++}
++
++TEST(AwNetworkPropertyPolicyTest, MojoPreservesBlockedProxyConfiguration) {
++  AwNetworkPropertyPolicy policy("invalid");
++  net::ProxyConfigWithAnnotation input(*policy.proxy_config(),
++                                       TRAFFIC_ANNOTATION_FOR_TESTS);
++  net::ProxyConfigWithAnnotation output;
++  ASSERT_TRUE(mojo::test::SerializeAndDeserialize<
++              network::mojom::ProxyConfigWithAnnotation>(input, output));
++  for (const char* url : {"https://example.test/", "http://localhost/"}) {
++    net::ProxyInfo info;
++    output.value().proxy_rules().Apply(GURL(url), &info);
++    EXPECT_TRUE(info.is_empty());
++  }
++}
++
++}  // namespace
++}  // namespace android_webview
+diff --git a/android_webview/browser/network_service/aw_proxy_config_monitor.cc b/android_webview/browser/network_service/aw_proxy_config_monitor.cc
+index b9b2552b0a1487ecc36cd01399c409203cfff876..21dd268ccf6d9cd845ee7405ead53115e7ea6bc7 100644
+--- a/android_webview/browser/network_service/aw_proxy_config_monitor.cc
++++ b/android_webview/browser/network_service/aw_proxy_config_monitor.cc
+@@ -9,9 +9,11 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "android_webview/browser/network_service/aw_network_property_policy.h"
+ #include "base/barrier_closure.h"
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/no_destructor.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_event.h"
+@@ -86,6 +88,20 @@ AwProxyConfigMonitor* AwProxyConfigMonitor::GetInstance() {
+ 
+ void AwProxyConfigMonitor::AddProxyToNetworkContextParams(
+     network::mojom::NetworkContextParams* network_context_params) {
++  const auto& policy = AwNetworkPropertyPolicy::Get();
++  if (policy.proxy_config()) {
++    if (!policy.proxy_is_valid()) {
++      LOG(ERROR) << "Invalid chromium.network.proxy; proxy traffic is blocked. "
++                    "Correct the property and restart the host app.";
++    }
++    network_context_params->initial_proxy_config =
++        net::ProxyConfigWithAnnotation(*policy.proxy_config(),
++                                       kProxyConfigTrafficAnnotation);
++    // Do not subscribe this context to system/AndroidX proxy updates, which
++    // could otherwise replace the pinned startup configuration after a restart
++    // of the network service or a network connectivity change.
++    return;
++  }
+   const base::CommandLine& command_line =
+       *base::CommandLine::ForCurrentProcess();
+   if (command_line.HasSwitch(kProxyServerSwitch)) {
+@@ -139,6 +155,10 @@ std::string AwProxyConfigMonitor::SetProxyOverride(
+     const std::vector<std::string>& bypass_rules,
+     const bool reverse_bypass,
+     base::OnceClosure callback) {
++  if (AwNetworkPropertyPolicy::Get().proxy_config()) {
++    return "A chromium.network.proxy startup override is active; clear the "
++           "property and restart the host app before using ProxyController.";
++  }
+   return proxy_config_service_android_->SetProxyOverride(
+       proxy_rules, bypass_rules, reverse_bypass,
+       base::BindOnce(&AwProxyConfigMonitor::FlushProxyConfig,
+diff --git a/android_webview/test/BUILD.gn b/android_webview/test/BUILD.gn
+index 5a4320dc4f5e11dd3539da4ff962464b4f41ae4d..023be81f583a0161f3624d45ec09b0dac61ec423 100644
+--- a/android_webview/test/BUILD.gn
++++ b/android_webview/test/BUILD.gn
+@@ -891,6 +891,7 @@ test("android_webview_unittests") {
+     "../browser/metrics/aw_metrics_service_client_unittest.cc",
+     "../browser/metrics/aw_server_side_allowlist_metrics_provider_unittest.cc",
+     "../browser/metrics/visibility_metrics_logger_unittest.cc",
++    "../browser/network_service/aw_network_property_policy_unittest.cc",
+     "../browser/network_service/aw_proxying_restricted_cookie_manager_unittest.cc",
+     "../browser/network_service/aw_proxying_url_loader_factory_unittest.cc",
+     "../browser/permission/media_access_permission_request_unittest.cc",
+diff --git a/third_party/blink/common/webview/property_overrides.cc b/third_party/blink/common/webview/property_overrides.cc
+index af90f6fbb7a6bee5052e29d68adf61457f6e5324..68d63fb2cb45d9b2343bb4e034b9331bb8c0ea8c 100644
+--- a/third_party/blink/common/webview/property_overrides.cc
++++ b/third_party/blink/common/webview/property_overrides.cc
+@@ -129,6 +129,10 @@ std::optional<std::string> WebViewPropertyOverrides::RequestedWith() const {
+   return value;
+ }
+ 
++std::optional<std::string> WebViewPropertyOverrides::NetworkProxy() const {
++  return GetString("chromium.network.proxy");
++}
++
+ std::vector<std::pair<std::string, std::string>>
+ WebViewPropertyOverrides::Brands(const char* name) const {
+   auto text = GetAsciiString(name);
+@@ -162,6 +166,11 @@ WebViewPropertyOverrides::Brands(const char* name) const {
+ std::optional<std::string> WebViewPropertyOverrides::IceAddress(
+     std::string_view type,
+     bool related) const {
++  // Proxy mode exposes candidates produced by the real routing policy, rather
++  // than pretending that text replacement changes the network's exit address.
++  if (NetworkProxy()) {
++    return std::nullopt;
++  }
+   const char* key = type == "host" || (type == "srflx" && related)
+                         ? "chromium.webrtc.private_ip"
+                         : "chromium.webrtc.public_ip";
+@@ -173,7 +182,7 @@ std::optional<std::string> WebViewPropertyOverrides::IceAddress(
+ }
+ 
+ std::string WebViewPropertyOverrides::RedactSdp(std::string_view input) const {
+-  if (GetBool("chromium.webrtc.sdp_redact") != true) {
++  if (NetworkProxy() || GetBool("chromium.webrtc.sdp_redact") != true) {
+     return std::string(input);
+   }
+   std::string output;
+diff --git a/third_party/blink/public/common/webview/property_overrides.h b/third_party/blink/public/common/webview/property_overrides.h
+index 923452394409569c6b03d29d47c0735d50dfc2fe..b5f0f8f87117f5a29db97a64733fb681879537ee 100644
+--- a/third_party/blink/public/common/webview/property_overrides.h
++++ b/third_party/blink/public/common/webview/property_overrides.h
+@@ -34,6 +34,8 @@ class BLINK_COMMON_EXPORT WebViewPropertyOverrides {
+   std::optional<std::string> UserAgent() const;
+   // nullopt: upstream policy; empty string: remove; otherwise replace.
+   std::optional<std::string> RequestedWith() const;
++  // Nonempty startup proxy URI. Validation and enforcement live in WebView.
++  std::optional<std::string> NetworkProxy() const;
+   std::vector<std::pair<std::string, std::string>> Brands(
+       const char* name) const;
+   std::optional<std::string> IceAddress(std::string_view type,
+diff --git a/webview_custom/NETWORK_POLICY.md b/webview_custom/NETWORK_POLICY.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..96e33edc78e46395d2d9d807433075fdab61cc43
+--- /dev/null
++++ b/webview_custom/NETWORK_POLICY.md
+@@ -0,0 +1,66 @@
++# WebView 网络策略
++
++本阶段为现有系统属性配置增加真正作用于 Chromium 网络栈的代理模式，并统一自定义 UA 的 WebView 入口。默认不设置代理，继续使用原生系统 / AndroidX 网络配置。
++
++## 启用与关闭
++
++在具有系统属性写权限的设备 shell 中，先设置配置，再启动宿主 App：
++
++```sh
++# 三种格式任选其一；地址仅为文档示例，必须换成设备可达的代理。
++setprop chromium.network.proxy 'http://192.0.2.1:7890'
++# setprop chromium.network.proxy 'https://proxy.example:443'
++# setprop chromium.network.proxy 'socks5://proxy.example:1080'
++setprop chromium.enable 1
++```
++
++关闭本次新增的代理模式，保留其他自定义功能：
++
++```sh
++setprop chromium.network.proxy -
++```
++
++该属性不存在、为空字符串或为 `-` 时不启用代理；`chromium.enable` 不是 `1` 时同样不启用。注意它与 `x_requested_with` 的空字符串语义不同。
++
++代理策略在宿主浏览器进程首次使用时保存快照；包括总开关在内的任何网络配置变更，都必须完整退出并重新启动宿主 App。仅刷新页面或重启 renderer 不足以更换策略。重新创建 NetworkContext / 网络服务时继续使用同一快照，避免部分连接使用新配置、部分使用旧配置。
++
++## 代理模式的行为
++
++- 使用 Chromium 原生 HTTP、HTTPS 或 SOCKS5 代理实现。只接受一个代理端点，不接受 PAC、按协议分流、代理列表、`direct://` 或 URI 中的用户名密码。
++- 代理配置应用到 WebView 的 NetworkContext，包括经过该上下文的 HTTP / HTTPS、WebSocket 和预取等请求。真实连接由网络栈执行，不通过修改页面返回的 IP 文本模拟。
++- 只有一个代理选项，没有 DIRECT 后备；连接失败不会自动回退直连。
++- 去掉 Chromium 对 localhost、回环和链路本地 URL 的隐式代理绕过。此模式不提供域名直连白名单；访问这些 HTTP URL 也会交给所选代理。
++- 非空但无效的配置保留为空的 PROXY_LIST，使请求失败；不会把解析错误转换成原生直连。日志会报告错误，不输出配置原文。修正属性后重启 App。
++- 配置优先于系统代理、命令行代理及 AndroidX ProxyController。该模式下调用 SetProxyOverride 会返回冲突说明；ClearProxyOverride 不能清除这个启动配置。先将属性设为 `-` 并重启，才能恢复 AndroidX 控制。
++- WebRTC 使用原生 `disable_non_proxied_udp` 策略，禁止非代理 UDP 和多网络接口收集；同时移除可能放宽该限制的按 URL 例外。TCP / TURN 连接是否可用取决于代理和服务端，通话可能失败。
++- WebTransport 在代理模式下明确拒绝，避免将不支持所选代理的传输当成普通 HTTPS。默认原生模式保留上游行为。
++- 停用旧的 `webrtc.public_ip`、`webrtc.private_ip` 和 `webrtc.sdp_redact` 文本改写。ICE / SDP 报告真实路由策略的结果。恢复原生网络模式后，旧配置仍按原有规则生效。
++
++## UA 和请求头
++
++`chromium.navigator.useragent` / `useragent2` / `useragent3` 的同一配置现在也接入 WebView 默认 UA 构造和 WebContents UA 设置，而不只在 URLLoader 最后修改 HTTP 头。它覆盖 App 显式设置的 UA，延续此前自定义属性优先的规则；配置非法时仍回退原生处理。
++
++UA-CH 继续使用已有浏览器侧元数据入口及权限规则。任意 UA 字符串不会自动转换成一套新设备资料；修改 UA 时仍需配套设置 `navigator.userAgentMeta.*`。本阶段没有推测或生成虚构的 GPU、系统版本等信息。
++
++X-Requested-With 仍保留三种语义：未设置 / `-` 使用原生策略，合法非空值替换，显式空值删除；重定向与预取复用现有处理。这个头不会改变网络出口。
++
++## 作用范围和验证边界
++
++当前网络配置是宿主进程级，所有 WebView Profile 共用，不是每个 Profile 独立的代理 API。它不代理宿主自己的 OkHttp、下载器、其他 App 或整个 Android 系统。没有改变 TLS 实现或系统 DNS 设置。
++
++HTTP / SOCKS5 的请求目标解析遵循 Chromium 对相应协议的实现；代理主机域名本身、WebRTC 解析、预解析及设备网络策略仍需抓包检查。本功能不承诺设备级 DNS 隔离，不能代替系统 VPN。
++
++主机回归命令：
++
++```sh
++python3 webview_custom/test_network_identity.py
++python3 webview_custom/test_properties.py
++python3 webview_custom/test_review_regressions.py
++python3 webview_custom/test_noise.py
++```
++
++新的主机回归编译实际默认 UA 方法、代理策略构造 / WebRTC 偏好方法和配置实现；只在 Bionic、net 解析器和类型边界使用适配器。它验证策略组装，不验证真实代理协议。
++
++`AwNetworkPropertyPolicyTest.*` 使用实际 net 解析、路由、回退和 Mojo 序列化。已加入 `android_webview_unittests`，需设备或模拟器执行；仅编译这些测试不代表设备测试通过。
++
++真机验收至少覆盖：默认无配置、有效代理、代理不可达、非法配置、网络切换及网络服务重建。用受控服务端检查 UA / UA-CH / X-Requested-With、重定向和 WebSocket，抓包检查 WebRTC 非代理 UDP、WebTransport 和 DNS。当前未完成这些真机检查。
+diff --git a/webview_custom/PROPERTY_PATCHES.md b/webview_custom/PROPERTY_PATCHES.md
+index b335e7ec0af9f62c20c999eb2e6b9549f825db51..2a6f9d59939e2d68edc752840f3f92c2b0647103 100644
+--- a/webview_custom/PROPERTY_PATCHES.md
++++ b/webview_custom/PROPERTY_PATCHES.md
+@@ -21,6 +21,7 @@ setprop chromium.enable 0
+ | 属性（均以 chromium. 开头） | 用途及格式 |
+ | --- | --- |
+ | config.x_requested_with | 未设置或 `-`：原生包名策略；非空：强制替换；显式空字符串：删除，示例 `setprop chromium.config.x_requested_with ''` |
++| network.proxy | 新增进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。非法非空配置阻断代理请求，修改后重启 App，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
+ | navigator.useragent / useragent2 / useragent3 | 按顺序拼接 HTTP / JS UA，首段必须非空；拒绝控制字符。每段受 Android 属性长度限制 |
+ | navigator.userAgentMeta.brands / fullVersionList | `Chromium,158&Android WebView,158` 格式，完整版本单独配置，拒绝不完整条目 |
+ | navigator.userAgentMeta.mobile / wow64 | 0/1 或 false/true |
+@@ -44,8 +45,8 @@ setprop chromium.enable 0
+ | navigator.connection.effectiveType | slow-2g/2g/3g/4g，按 IDL 校验 |
+ | navigator.connection.downlinkMax / downlink | 有限数 0..1e9（Mbps） |
+ | navigator.connection.rtt | 整数 0..2147483647（毫秒） |
+-| webrtc.public_ip / private_ip | 有效 IPv4；替换 ICE candidate/address/relatedAddress/toJSON 的报告值，保留端口和 raddr/rport 结构；IPv6/mDNS 保持原样，不改变真实网络出口 |
+-| webrtc.sdp_redact | 新增独立开关；true/1 时移除 SDP candidate 行并将 c=IN IP4 置为 0.0.0.0。默认不做；可能影响复制 SDP 建立连接 |
++| webrtc.public_ip / private_ip | 有效 IPv4；替换 ICE candidate/address/relatedAddress/toJSON 的报告值，保留端口和 raddr/rport 结构；IPv6/mDNS 保持原样，不改变真实网络出口。network.proxy 启用时不做文本改写 |
++| webrtc.sdp_redact | 独立开关；true/1 时移除 SDP candidate 行并将 c=IN IP4 置为 0.0.0.0。默认不做；可能影响复制 SDP 建立连接。network.proxy 启用时不做文本改写 |
+ | audio.randomDouble | 有限配置数，0 关闭；每个声道首次有效 JavaScript 读取统一处理一次，内部播放、卷积与清零不会触发加噪，增量 clamp(seed*0.123, -1e-5, 1e-5)，保留零和非有限样本；两种读取接口共享数据 |
+ | webgl.unmasked_vendor / unmasked_renderer | 仅修改 WEBGL_debug_renderer_info 解锁后的字符串；保留扩展及 context-lost 检查，不改变真实 GPU |
+ | canvas.toDataUrl.randomDouble | 有限配置数，0 关闭；通过 seed 位混合选择起点，扫描实际像素寻找不透明的 8-bit RGBA/BGRA 像素，仅找到时复制并翻转一个颜色位后编码。跳过行填充；无候选像素不分配副本。保持原画布及编码格式；不影响 toBlob/getImageData |
+diff --git a/webview_custom/README.md b/webview_custom/README.md
+index b7a244e1c3a8cdfc587e5a6a519db6b5ee04d618..6d1569a6557125970397d06f46fb369662e3d4d7 100644
+--- a/webview_custom/README.md
++++ b/webview_custom/README.md
+@@ -40,3 +40,7 @@ CHROMIUM_WEBVIEW_BUILD_ONLY=1 /home/qiled/chromium-android-latest/run-webview-bu
+ 系统属性配置与逐项迁移说明见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
+ 
+ 代码质量修复后的配置实现位于 `third_party/blink/common/webview/property_overrides.cc`，浏览器侧统一处理 UA 元数据。回归命令和行为细节见 PROPERTY_PATCHES.md。
++
++## 网络策略升级
++
++[NETWORK_POLICY.md](NETWORK_POLICY.md) 说明可配置的真实代理、WebRTC 路由限制、WebTransport 处理及 UA 入口统一。默认保持原生网络；修改启动策略后需要完整重启宿主 App。当前为进程级配置，真机网络验证尚未完成。
+diff --git a/webview_custom/test_network_identity.py b/webview_custom/test_network_identity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f7ab61b849e7ed28a09de7db47ce0797fa57477
+--- /dev/null
++++ b/webview_custom/test_network_identity.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++"""Check actual default-UA construction and proxy/ICE compatibility gates."""
++from pathlib import Path
++import subprocess
++from test_support import definition, host_build
++
++source_root = Path(__file__).resolve().parents[1]
++code = (source_root / 'webview_custom/tests/network_identity_test.cc').read_text()
++ua = definition(source_root,
++                'android_webview/browser/aw_content_browser_client.cc',
++                'std::string GetUserAgent() {')
++code = code.replace('PRODUCTION_DEFAULT_UA', ua)
++policy_path = 'android_webview/browser/network_service/aw_network_property_policy.cc'
++policy = '\n'.join(definition(source_root, policy_path, signature) for signature in (
++    'AwNetworkPropertyPolicy::AwNetworkPropertyPolicy(',
++    'bool AwNetworkPropertyPolicy::ApplyWebRtcPolicy('))
++code = code.replace('PRODUCTION_NETWORK_POLICY', policy)
++with host_build(source_root, code) as executable:
++    subprocess.run([str(executable)], check=True)
++print('PASS: default UA, proxy policy assembly, WebRTC preferences and ICE gates (ASan/UBSan)')
+diff --git a/webview_custom/tests/network_identity_test.cc b/webview_custom/tests/network_identity_test.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..48ba2c9b7aeb6b65f6a83cf2791688de3434a85a
+--- /dev/null
++++ b/webview_custom/tests/network_identity_test.cc
+@@ -0,0 +1,179 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <sys/system_properties.h>
++
++#include <algorithm>
++#include <cassert>
++#include <string>
++
++#include "third_party/blink/public/common/webview/property_overrides.h"
++
++// Native net parsing/routing is covered by aw_network_property_policy_unittest.
++// These adapters only check the production policy's decisions at that boundary.
++namespace net {
++struct ProxyServer {
++  enum Scheme { SCHEME_HTTP };
++  struct Endpoint {
++    int value;
++    int port() const { return value; }
++  } endpoint;
++  const Endpoint& host_port_pair() const { return endpoint; }
++};
++struct ProxyChain {
++  bool single;
++  ProxyServer server;
++  bool is_single_proxy() const { return single; }
++  const ProxyServer& First() const { return server; }
++};
++inline bool parser_accepts = true;
++inline int parsed_port = 7890;
++inline int parse_calls = 0;
++ProxyChain ProxyUriToProxyChain(std::string_view, ProxyServer::Scheme) {
++  ++parse_calls;
++  return {parser_accepts, {{parsed_port}}};
++}
++struct ProxyConfig {
++  struct ProxyRules {
++    enum class Type { EMPTY, PROXY_LIST };
++    struct Bypass {
++      bool subtract_implicit = false;
++      void AddRulesToSubtractImplicit() { subtract_implicit = true; }
++    } bypass_rules;
++    struct List {
++      bool has_proxy = false;
++      void SetSingleProxyChain(const ProxyChain&) { has_proxy = true; }
++    } single_proxies;
++    Type type = Type::EMPTY;
++  } rules;
++  ProxyRules& proxy_rules() { return rules; }
++  const ProxyRules& proxy_rules() const { return rules; }
++};
++}  // namespace net
++namespace blink {
++namespace mojom {
++enum class WebRtcIpHandlingPolicy { kDefault, kDisableNonProxiedUdp };
++}
++struct RendererPreferences {
++  mojom::WebRtcIpHandlingPolicy webrtc_ip_handling_policy =
++      mojom::WebRtcIpHandlingPolicy::kDefault;
++  std::vector<int> webrtc_ip_handling_urls;
++};
++}  // namespace blink
++
++void set(const char* name, const char* value) {
++  props[name] = {name, value};
++}
++namespace base {
++struct CommandLine {
++  static CommandLine* ForCurrentProcess() {
++    static CommandLine line;
++    return &line;
++  }
++  bool HasSwitch(const char*) const { return false; }
++};
++}  // namespace base
++namespace embedder_support {
++constexpr char kUseMobileUserAgent[] = "mobile";
++enum class IncludeAndroidBuildNumber { Include };
++std::string BuildUserAgentFromOSAndProduct(const char*, const std::string&) {
++  return "native";
++}
++std::string BuildUserAgentFromProductAndExtraOSInfo(const std::string&,
++                                                    const char*,
++                                                    IncludeAndroidBuildNumber) {
++  return "native";
++}
++}  // namespace embedder_support
++namespace android_webview {
++struct AwNetworkPropertyPolicy {
++  explicit AwNetworkPropertyPolicy(std::optional<std::string>);
++  bool ApplyWebRtcPolicy(blink::RendererPreferences&) const;
++  std::optional<net::ProxyConfig> proxy_config_;
++  bool proxy_is_valid_ = true;
++};
++PRODUCTION_NETWORK_POLICY
++namespace switches {
++constexpr char kWebViewReduceUAAndroidVersionDeviceModel[] = "reduce";
++}
++std::string GetProduct() {
++  return "Chromium/158";
++}
++PRODUCTION_DEFAULT_UA
++}  // namespace android_webview
++
++int main() {
++  using android_webview::AwNetworkPropertyPolicy;
++  using blink::WebViewPropertyOverrides;
++  AwNetworkPropertyPolicy native(std::nullopt);
++  assert(!native.proxy_config_);
++  blink::RendererPreferences prefs;
++  assert(!native.ApplyWebRtcPolicy(prefs));
++  for (const char* endpoint :
++       {"http://192.0.2.1:7890", "https://proxy.example:443",
++        "socks5://[2001:db8::1]:1080"}) {
++    AwNetworkPropertyPolicy policy(endpoint);
++    assert(policy.proxy_config_ && policy.proxy_is_valid_);
++    const auto& rules = policy.proxy_config_->proxy_rules();
++    assert(rules.type == net::ProxyConfig::ProxyRules::Type::PROXY_LIST);
++    assert(rules.single_proxies.has_proxy &&
++           rules.bypass_rules.subtract_implicit);
++    prefs.webrtc_ip_handling_urls.push_back(1);
++    assert(policy.ApplyWebRtcPolicy(prefs));
++    assert(prefs.webrtc_ip_handling_policy ==
++           blink::mojom::WebRtcIpHandlingPolicy::kDisableNonProxiedUdp);
++    assert(prefs.webrtc_ip_handling_urls.empty());
++    assert(!policy.ApplyWebRtcPolicy(prefs));
++  }
++  for (const char* invalid :
++       {"direct://", "http://user:pass@proxy:7890", "http://proxy/path",
++        "http://proxy:80,direct://", "http://proxy:80;https=direct://",
++        "http://proxy:80\n"}) {
++    int before = net::parse_calls;
++    AwNetworkPropertyPolicy policy(invalid);
++    assert(policy.proxy_config_ && !policy.proxy_is_valid_);
++    assert(!policy.proxy_config_->proxy_rules().single_proxies.has_proxy);
++    assert(policy.proxy_config_->proxy_rules().bypass_rules.subtract_implicit);
++    assert(net::parse_calls == before);
++  }
++  net::parser_accepts = false;
++  AwNetworkPropertyPolicy rejected("http://proxy:bad");
++  assert(rejected.proxy_config_ && !rejected.proxy_is_valid_);
++  net::parser_accepts = true;
++  net::parsed_port = 0;
++  AwNetworkPropertyPolicy zero_port("http://proxy:0");
++  assert(zero_port.proxy_config_ && !zero_port.proxy_is_valid_);
++  assert(android_webview::GetUserAgent() == "native");
++  set("chromium.enable", "1");
++  set("chromium.navigator.useragent", "Mozilla/5.0 ");
++  set("chromium.navigator.useragent2", "configured ");
++  set("chromium.navigator.useragent3", "WebView");
++  assert(android_webview::GetUserAgent() == "Mozilla/5.0 configured WebView");
++  set("chromium.navigator.useragent2", "bad\r\nInjected: yes");
++  assert(android_webview::GetUserAgent() == "native");
++  set("chromium.network.proxy", "http://192.0.2.1:7890");
++  assert(WebViewPropertyOverrides().NetworkProxy() == "http://192.0.2.1:7890");
++  set("chromium.webrtc.public_ip", "203.0.113.5");
++  set("chromium.webrtc.private_ip", "192.168.2.10");
++  set("chromium.webrtc.sdp_redact", "1");
++  const std::string candidate = "candidate:1 1 udp 1 10.0.0.1 4567 typ host";
++  const std::string sdp = "v=0\r\na=" + candidate + "\r\n";
++  assert(!WebViewPropertyOverrides().IceAddress("host"));
++  assert(WebViewPropertyOverrides().IceCandidate(candidate) == candidate);
++  assert(WebViewPropertyOverrides().RedactSdp(sdp) == sdp);
++  // An invalid nonempty proxy remains an explicit selection: the browser
++  // blocks traffic rather than treating it as a request to restore native mode.
++  set("chromium.network.proxy", "invalid");
++  assert(WebViewPropertyOverrides().NetworkProxy() == "invalid");
++  assert(WebViewPropertyOverrides().IceCandidate(candidate) == candidate);
++  set("chromium.network.proxy", "-");
++  assert(!WebViewPropertyOverrides().NetworkProxy());
++  assert(WebViewPropertyOverrides().IceCandidate(candidate) != candidate);
++  set("chromium.network.proxy", "");
++  assert(!WebViewPropertyOverrides().NetworkProxy());
++  set("chromium.network.proxy", "http://192.0.2.1:7890");
++  set("chromium.enable", "0");
++  assert(!WebViewPropertyOverrides().NetworkProxy());
++  assert(android_webview::GetUserAgent() == "native");
++}

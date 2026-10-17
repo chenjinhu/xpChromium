@@ -6,8 +6,8 @@
 | --- | --- |
 | Chromium 版本 | `158.0.8109.0` |
 | 官方基线 | `51b3c21991199bc9531e7d296056dd9351554c0c` |
-| 已编译的自定义源码提交 | `02b7cf0fc73439a0eaaacd262cba3307ce0d02e2` |
-| 自定义提交数 | 9 |
+| 自定义源码提交 | `1598a163cff1c3ed23c6406f8bcdded6cd4c06ea` |
+| 自定义提交数 | 10 |
 | 构建目标 | `system_webview_64_apk` |
 | APK 包名 | `com.android.webview` |
 
@@ -16,6 +16,7 @@
 ## 功能和配置
 
 - [系统属性配置、26 个旧补丁的迁移及质量修复](docs/PROPERTY_PATCHES.md)
+- [真实代理、WebRTC 路由和网络身份配置](docs/NETWORK_POLICY.md)
 - [Window、Canvas fillRect 和桌面定制说明](docs/ORIGINAL_PATCH_NOTES.md)
 - [构建、回归和签名验证记录](docs/VERIFICATION.md)
 - [WebView 编译参数](config/webview-arm64.gn)

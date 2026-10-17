@@ -3,7 +3,7 @@
   "chromium_version": "158.0.8109.0",
   "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
   "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
-  "source_head": "02b7cf0fc73439a0eaaacd262cba3307ce0d02e2",
+  "source_head": "1598a163cff1c3ed23c6406f8bcdded6cd4c06ea",
   "target": {
     "os": "android",
     "cpu": "arm64",
@@ -64,7 +64,13 @@
       "source_commit": "02b7cf0fc73439a0eaaacd262cba3307ce0d02e2",
       "subject": "Fix WebView override isolation, metadata validation and pixel export",
       "sha256": "ce12c58ff103d0894cd2fac65d69f740bc78477c9e3213c79720d18b9e2673ee"
+    },
+    {
+      "file": "patches/0010-1598a163cf.patch",
+      "source_commit": "1598a163cff1c3ed23c6406f8bcdded6cd4c06ea",
+      "subject": "Coordinate WebView proxy routing, WebRTC policy and user agent identity",
+      "sha256": "6106a739186486aed6ec05257095d3d1a1b024fcccd2a089ad9442741408d232"
     }
   ],
-  "source_tree": "2b8375977d6175cc2f70f00a4db68a737b9330a1"
+  "source_tree": "8944b1caec621d4e13dcb3ad50775bbdb19f5953"
 }
