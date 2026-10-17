@@ -1,0 +1,103 @@
+From cfc574e8e4f882047107c3fded8ec3e0f5a6f70a Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sun, 18 Oct 2026 01:39:50 +0800
+Subject: [PATCH] Declare native identity test header dependencies
+
+Expose the small production identity header set to native host tests without linking the full Blink common library. List the copied network test helper headers as sources of the test executable.
+
+Validation: GN header dependency checks pass for all webview_custom native test targets.
+
+diff --git a/third_party/blink/public/common/BUILD.gn b/third_party/blink/public/common/BUILD.gn
+index 7c4d3a053726bc0e78372580f08ed3828d6e0f77..1d11abb8959a75397f91332ffb735d5aaa8ab1c3 100644
+--- a/third_party/blink/public/common/BUILD.gn
++++ b/third_party/blink/public/common/BUILD.gn
+@@ -98,6 +98,23 @@ source_set("common_export") {
+   sources = [ "common_export.h" ]
+ }
+ 
++# Native host tests compile the small production identity helpers directly.
++# Keep their header dependencies independent of the full Blink common library.
++source_set("webview_identity_test_headers") {
++  testonly = true
++  visibility = [ "//webview_custom:*" ]
++  sources = [
++    "webview/fingerprint_config.h",
++    "webview/identity_utils.h",
++    "webview/property_overrides.h",
++    "webview/regional_settings.h",
++  ]
++  public_deps = [
++    ":common_export",
++    "//base",
++  ]
++}
++
+ source_set("preloading_headers") {
+   deps = [ ":common_export" ]
+   sources = [ "navigation/preloading_headers.h" ]
+diff --git a/webview_custom/BUILD.gn b/webview_custom/BUILD.gn
+index 46836b3f566a0b7dcd8e9a798dfe873c9705c3d3..ae2a1a87210111b1c71f8aea4eaf54fae3a39e0c 100644
+--- a/webview_custom/BUILD.gn
++++ b/webview_custom/BUILD.gn
+@@ -6,6 +6,7 @@ executable("fingerprint_config_test") {
+   testonly = true
+   sources = [
+     "../android_webview/browser/aw_fingerprint_config_file.cc",
++    "../android_webview/browser/aw_fingerprint_config_file.h",
+     "../third_party/blink/common/webview/fingerprint_config.cc",
+     "../third_party/blink/common/webview/identity_utils.cc",
+     "../third_party/blink/common/webview/property_overrides.cc",
+@@ -17,6 +18,7 @@ executable("fingerprint_config_test") {
+     "//base",
+     "//base:i18n",
+     "//net",
++    "//third_party/blink/public/common:webview_identity_test_headers",
+     "//third_party/icu",
+     "//url",
+   ]
+@@ -26,6 +28,7 @@ executable("ip_geolocation_test") {
+   testonly = true
+   sources = [
+     "../android_webview/browser/aw_ip_geolocation_context.cc",
++    "../android_webview/browser/aw_ip_geolocation_context.h",
+     "../services/network/test/test_url_loader_factory.cc",
+     "../services/network/test/test_url_loader_factory.h",
+     "../services/network/test/test_utils.cc",
+@@ -63,15 +66,20 @@ executable("identity_utils_test") {
+     "tests/identity_utils_test.cc",
+   ]
+   defines = [ "BLINK_COMMON_IMPLEMENTATION" ]
+-  deps = [ "//base" ]
++  deps = [
++    "//base",
++    "//third_party/blink/public/common:webview_identity_test_headers",
++  ]
+ }
+ 
+ executable("socks5_auth_test") {
+   testonly = true
+   sources = [
+     "../net/socket/connect_job_test_util.cc",
++    "../net/socket/connect_job_test_util.h",
+     "../net/socket/socks5_client_socket_unittest.cc",
+     "../net/socket/transport_client_socket_pool_test_util.cc",
++    "../net/socket/transport_client_socket_pool_test_util.h",
+     "../net/socket/transport_connect_job_unittest.cc",
+     "tests/net_test_main.cc",
+     "tests/network_session_identity_test.cc",
+@@ -91,6 +99,7 @@ executable("identity_data_test") {
+   defines = [ "BLINK_COMMON_IMPLEMENTATION" ]
+   sources = [
+     "../android_webview/browser/aw_identity_data.cc",
++    "../android_webview/browser/aw_identity_data.h",
+     "../third_party/blink/common/webview/regional_settings.cc",
+     "tests/identity_data_test.cc",
+   ]
+@@ -98,6 +107,7 @@ executable("identity_data_test") {
+     "//base",
+     "//base:i18n",
+     "//net",
++    "//third_party/blink/public/common:webview_identity_test_headers",
+     "//third_party/icu",
+     "//url",
+   ]

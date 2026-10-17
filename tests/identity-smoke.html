@@ -1,0 +1,107 @@
+<!doctype html>
+<!-- Copyright 2026 The Chromium Authors. BSD-style license: see LICENSE. -->
+<meta charset="utf-8">
+<title>xpChromium 身份检查</title>
+<style>body{font:16px system-ui;max-width:960px;margin:30px auto;padding:16px}pre{white-space:pre-wrap}button{padding:10px}</style>
+<h1>xpChromium 身份检查</h1>
+<p>此页面在当前 WebView 内检查接口一致性。语言、时区、DNT 可用 URL 参数 language、timezone、dnt 指定期望值；noise=1 要求图像扰动生效。</p>
+<button id="run">重新检查</button> <button id="speak">播放首个可用语音</button>
+<pre id="results"></pre>
+<script>
+'use strict';
+const output = document.querySelector('#results');
+const expected = new URL(location.href).searchParams;
+const assert = (value, message) => { if (!value) throw new Error(message); };
+const equal = (a,b) => a.length === b.length && a.every((v,i) => v === b[i]);
+const make = () => { const c=document.createElement('canvas');c.width=96;c.height=48;return c; };
+async function imagePixels(source) {
+  const bitmap = await createImageBitmap(source);
+  const c=make(), ctx=c.getContext('2d');ctx.drawImage(bitmap,0,0);bitmap.close();
+  return ctx.getImageData(0,0,c.width,c.height).data;
+}
+async function run() {
+ output.textContent='';
+ let failures=0;
+ async function test(name, fn) {
+  try { await fn();output.textContent+='PASS '+name+'\n'; }
+  catch(error) { ++failures;output.textContent+='FAIL '+name+': '+error.message+'\n'; }
+ }
+ await test('navigator、Intl、Date、DNT', () => {
+  const tz=Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const locale=Intl.NumberFormat().resolvedOptions().locale;
+  const actual={userAgent:navigator.userAgent,languages:navigator.languages,locale,timezone:tz,offset:new Date().getTimezoneOffset(),dnt:navigator.doNotTrack,brands:navigator.userAgentData?.brands};
+  output.textContent+=JSON.stringify(actual,null,2)+'\n';
+  if(expected.has('language')) assert(navigator.language===expected.get('language'),'navigator.language');
+  if(expected.has('timezone')) assert(tz===expected.get('timezone'),'Intl timezone');
+  if(expected.has('dnt')) assert(navigator.doNotTrack===expected.get('dnt'),'navigator.doNotTrack');
+ });
+ await test('Canvas 全图/子区域/PNG/Blob/OffscreenCanvas', async () => {
+  const c=make(),ctx=c.getContext('2d');ctx.fillStyle='#ff8040';ctx.fillRect(0,0,96,48);
+  const first=ctx.getImageData(0,0,96,48).data;
+  assert(equal(first,ctx.getImageData(0,0,96,48).data),'重复读取发生变化');
+  const crop=ctx.getImageData(11,9,63,31).data;
+  for(let y=0;y<31;y++) for(let x=0;x<63;x++) for(let k=0;k<4;k++)
+   assert(crop[(y*63+x)*4+k]===first[((y+9)*96+x+11)*4+k],'子区域不一致');
+  const dataBlob=await (await fetch(c.toDataURL('image/png'))).blob();
+  assert(equal(first,await imagePixels(dataBlob)),'toDataURL/解码/读取不一致');
+  const blob=await new Promise(resolve=>c.toBlob(resolve,'image/png'));
+  assert(blob && equal(first,await imagePixels(blob)),'toBlob 不一致');
+  if(typeof OffscreenCanvas!=='undefined') {
+   const off=new OffscreenCanvas(96,48),oc=off.getContext('2d');oc.fillStyle='#ff8040';oc.fillRect(0,0,96,48);
+   assert(equal(first,oc.getImageData(0,0,96,48).data),'Offscreen 读取不一致');
+   assert(equal(first,await imagePixels(await off.convertToBlob({type:'image/png'}))),'convertToBlob 不一致');
+  }
+  if(expected.get('noise')==='1') assert(first.some((v,i)=>i%4<3&&v!==[255,128,64][i%4]),'图像扰动未生效');
+ });
+ await test('WebGL2 RGBA8、PBO 与 PNG 导出', async () => {
+  const c=make(),gl=c.getContext('webgl2',{preserveDrawingBuffer:true});
+  assert(gl,'WebGL2 不可用');gl.clearColor(1,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  const direct=new Uint8Array(96*48*4);gl.readPixels(0,0,96,48,gl.RGBA,gl.UNSIGNED_BYTE,direct);
+  assert(gl.getError()===gl.NO_ERROR,'readPixels GL error');
+  const pbo=gl.createBuffer();gl.bindBuffer(gl.PIXEL_PACK_BUFFER,pbo);gl.bufferData(gl.PIXEL_PACK_BUFFER,direct.length,gl.STREAM_READ);
+  gl.readPixels(0,0,96,48,gl.RGBA,gl.UNSIGNED_BYTE,0);
+  const fromPbo=new Uint8Array(direct.length);gl.getBufferSubData(gl.PIXEL_PACK_BUFFER,0,fromPbo);
+  assert(gl.getError()===gl.NO_ERROR,'PBO GL error');assert(equal(direct,fromPbo),'PBO 与直接回读不一致');
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);gl.deleteBuffer(pbo);
+  const decoded=await imagePixels(await (await fetch(c.toDataURL('image/png'))).blob());
+  for(let y=0;y<48;y++) for(let x=0;x<96;x++) for(let k=0;k<4;k++)
+   assert(direct[(y*96+x)*4+k]===decoded[((47-y)*96+x)*4+k],'WebGL 导出坐标或像素不一致');
+ });
+ await test('WebAudio 通道、analyser float/byte', async () => {
+  const context=new OfflineAudioContext(1,4096,44100),osc=context.createOscillator(),analyser=context.createAnalyser();
+  osc.connect(analyser);analyser.connect(context.destination);osc.start();
+  const rendered=await context.startRendering();const a=rendered.getChannelData(0).slice();
+  const b=new Float32Array(a.length);rendered.copyFromChannel(b,0);
+  assert(equal(a,b)&&equal(a,rendered.getChannelData(0)),'通道重复读取不一致');
+  const f=new Float32Array(analyser.frequencyBinCount),u=new Uint8Array(f.length);
+  analyser.getFloatFrequencyData(f);analyser.getByteFrequencyData(u);
+  for(let i=0;i<f.length;i++) {
+   const byte=Math.max(0,Math.min(255,Math.floor(255*(f[i]-analyser.minDecibels)/(analyser.maxDecibels-analyser.minDecibels))));
+   assert(Math.abs(byte-u[i])<=1,'频域 float/byte 不一致');
+  }
+  const t=new Float32Array(analyser.fftSize),v=new Uint8Array(t.length);
+  analyser.getFloatTimeDomainData(t);analyser.getByteTimeDomainData(v);
+  for(let i=0;i<t.length;i++) assert(v[i]===Math.max(0,Math.min(255,Math.floor(128*(t[i]+1)))),'时域 float/byte 不一致');
+ });
+ await test('Element/Range 几何与语音列表', () => {
+  const node=document.createElement('span');node.textContent='Geometry sample';document.body.append(node);
+  const range=document.createRange();range.selectNodeContents(node);
+  for(const rect of [...node.getClientRects(),node.getBoundingClientRect(),...range.getClientRects(),range.getBoundingClientRect()]) {
+   assert(Math.abs(rect.right-rect.left-rect.width)<1e-6,'rect.width');
+   assert(Math.abs(rect.bottom-rect.top-rect.height)<1e-6,'rect.height');
+  }
+  assert(JSON.stringify(node.getBoundingClientRect())===JSON.stringify(node.getBoundingClientRect()),'几何重复读取不一致');node.remove();
+  const voices=speechSynthesis.getVoices();
+  output.textContent+='voices='+JSON.stringify(voices.map(v=>({name:v.name,lang:v.lang,uri:v.voiceURI,default:v.default})))+'\n';
+  assert(equal(voices.map(v=>v.voiceURI),speechSynthesis.getVoices().map(v=>v.voiceURI)),'语音顺序不稳定');
+ });
+ output.textContent+='\n'+(failures?'存在 '+failures+' 项失败':'以上接口检查通过。HTTP 头、代理出口和私网阻止仍需网络端验证。');
+}
+document.querySelector('#run').onclick=run;
+document.querySelector('#speak').onclick=()=>{
+ const voices=speechSynthesis.getVoices(),utterance=new SpeechSynthesisUtterance('xpChromium voice test');
+ if(voices[0]) utterance.voice=voices[0];utterance.onerror=event=>output.textContent+='\nspeech error='+event.error;
+ speechSynthesis.speak(utterance);
+};
+run();
+</script>

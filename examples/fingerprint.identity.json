@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "enabled": true,
+  "settings": {
+    "device.template": "android-arm64",
+    "fingerprint.seed": "replace-with-your-stable-device-id",
+    "fingerprint.noise": true,
+    "regional.mode": "ip",
+    "geolocation.mode": "ip",
+    "speech.maxVoices": 8
+  }
+}

@@ -6,8 +6,8 @@
 | --- | --- |
 | Chromium 版本 | `158.0.8109.0` |
 | 官方基线 | `51b3c21991199bc9531e7d296056dd9351554c0c` |
-| 自定义源码提交 | `9f4b898a58ed183a1fabb060a39b4eeac8eefae4` |
-| 自定义提交数 | 13 |
+| 自定义源码提交 | `cfc574e8e4f882047107c3fded8ec3e0f5a6f70a` |
+| 自定义提交数 | 16 |
 | 构建目标 | `system_webview_64_apk` |
 | APK 包名 | `com.android.webview` |
 
@@ -16,6 +16,9 @@
 ## 功能和配置
 
 - [指纹配置字段、26 个旧补丁的迁移及质量修复](docs/PROPERTY_PATCHES.md)
+- [稳定指纹、代理认证、IP 地区联动和网络限制](docs/IDENTITY_UPGRADE.md)
+- [稳定指纹、代理认证、IP 地区联动和网络限制](docs/IDENTITY_UPGRADE.md)
+- [稳定指纹、代理认证、IP 地区联动和网络限制](docs/IDENTITY_UPGRADE.md)
 - [真实代理、WebRTC 路由和网络身份配置](docs/NETWORK_POLICY.md)
 - [启动文件配置、自动 brands 和生命周期](docs/UNIFIED_CONFIG.md)
 - [Window、Canvas fillRect 和桌面定制说明](docs/ORIGINAL_PATCH_NOTES.md)
@@ -24,7 +27,7 @@
 
 WebView 初始化时自动读取 `/sdcard/xpChromium/fingerprint.json`，不需要宿主主动调用方法。已经取消系统属性输入和旧的 Java configure API。文件格式、存储权限和自动 brands 规则见 [UNIFIED_CONFIG.md](docs/UNIFIED_CONFIG.md)，示例见 [examples/fingerprint.json](examples/fingerprint.json)。brands / fullVersionList 可省略，自动跟随自定义 UA 的合法 Chrome/版本或实际内核版本；默认关闭字段覆盖、代理和 Canvas 扰动。配置启动时冻结，修改文件后需完整重启宿主进程。
 
-通过 `geolocation.mode=ip` 可在定位获准后按当前 WebView 的网络出口查询近似位置，失败返回不可用；默认使用原生定位。配置示例见 [fingerprint-ip.json](examples/fingerprint-ip.json)。语言和时区尚未与出口联动。
+通过 `geolocation.mode=ip` 可在定位获准后按当前 WebView 的网络出口查询近似位置，失败返回不可用；默认使用原生定位。配置示例见 [fingerprint-ip.json](examples/fingerprint-ip.json)。设置 `regional.mode=ip` 后会同时设置 navigator / Accept-Language / Intl locale / Date 时区，并在首个页面提交前完成 renderer 确认。稳定指纹示例见 [fingerprint.identity.json](examples/fingerprint.identity.json)。新增能力默认关闭，详见 [IDENTITY_UPGRADE.md](docs/IDENTITY_UPGRADE.md)。
 
 ## 在现有服务器继续开发
 

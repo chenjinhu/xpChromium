@@ -3,7 +3,7 @@
   "chromium_version": "158.0.8109.0",
   "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
   "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
-  "source_head": "9f4b898a58ed183a1fabb060a39b4eeac8eefae4",
+  "source_head": "cfc574e8e4f882047107c3fded8ec3e0f5a6f70a",
   "target": {
     "os": "android",
     "cpu": "arm64",
@@ -88,7 +88,25 @@
       "source_commit": "9f4b898a58ed183a1fabb060a39b4eeac8eefae4",
       "subject": "Resolve WebView geolocation from its network exit IP",
       "sha256": "2e6b0cd7dd549df94aa075b8dd389989dfa230323b7101f6259bdd87e45e6917"
+    },
+    {
+      "file": "patches/0014-481721d59f.patch",
+      "source_commit": "481721d59f51daaacc7adf021562807af938e9e4",
+      "subject": "Unify startup identity, authenticated routing and stable fingerprint readbacks",
+      "sha256": "21855c42a2213b5f2bb084d147944dd98d0892fda5344e2de2449b17f4ee1fa1"
+    },
+    {
+      "file": "patches/0015-7989b6ca19.patch",
+      "source_commit": "7989b6ca197ff3cd7b1757385f66da969ab7edd3",
+      "subject": "Keep regional Accept-Language consistent for all WebView requests",
+      "sha256": "16a772edd4706cc1f43a729adbc84a11afcaa74fc4f3ce8353b19f2d2cc664cc"
+    },
+    {
+      "file": "patches/0016-cfc574e8e4.patch",
+      "source_commit": "cfc574e8e4f882047107c3fded8ec3e0f5a6f70a",
+      "subject": "Declare native identity test header dependencies",
+      "sha256": "656414dba3d2e94a5db29eb665b261fb8e15a6f0a6b2c58158e5c8b713a761c0"
     }
   ],
-  "source_tree": "1bdf1045027a1b877478aa05e71445b486282a80"
+  "source_tree": "17bac118bfaba9ef6df99c883ea39fd7564d1da5"
 }

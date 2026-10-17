@@ -1,5 +1,23 @@
 # 构建验证记录
 
+## 统一身份升级（2026-10-18）
+
+- 源码提交：`cfc574e8e4f882047107c3fded8ec3e0f5a6f70a`；源码树：`17bac118bfaba9ef6df99c883ea39fd7564d1da5`。
+- 固定提交的 Android arm64 完整目标在 2026-10-18T01:40:40+08:00 构建完成；构建前后源码工作区干净。
+- 实际 Chromium 配置存储、文件读取及错误文件阻止网络测试通过；新增示例在全新进程导入通过。配置共 77 个字段，renderer 快照不含代理账号、密码和服务 URL。
+- 稳定像素算法覆盖重复投影、子区域、行填充、alpha、RGBA/BGRA、WebGL 方向及音频边界；IP 数据解析使用实际 ICU 语言/时区校验。
+- 43 项原生 HTTP/SOCKS5/传输/请求头测试通过，包含同步和异步分段认证、拒绝认证降级、Digest 重复失败限制、代理凭据与网站 401 隔离、私网 DNS 结果在创建 TCP 套接字前阻止、显式内网代理端点例外。
+- 实际 SimpleURLLoader/TestURLLoaderFactory/Mojo 定位回归通过，包括共享解析器合并请求、缓存、授权、错误、销毁和 override 顺序。
+- 既有 5 组主机回归通过，C++ 边界回归启用 ASan/UBSan；包含原来的 9 项质量回归和 81 种 fillRect 偏移。
+- 原生测试目标的 GN 依赖检查通过；54 个文件的新增 C++ include 检查无违规；WebView browser、Blink common、network service、net 的 GN 头文件依赖检查通过。
+- 16 个补丁从官方基线在临时索引逐个重放，每一步源码树与原始提交一致，最终匹配上述源码树。
+- APK ZIP、包名 `com.android.webview`、版本、minSdk 29、targetSdk 36、arm64 ABI、16 KiB ZIP/ELF 对齐、编译后的功能标记及 RK14 v2/v3 签名均已核验；签名前后 ZIP 条目 CRC/大小一致。
+- APK：`SystemWebView-158.0.8109.0-arm64-identity-rk14.apk`，329206939 字节；SHA-256：`f6649880cbd564a250a1c92ceda08b5ef7d277a3c50f8670ca903e4cf416c2fc`。
+- 证书 SHA-256：`cf2ab3818595c4eda08cec72bbe39bc377a30b764a3eebde52536eae01808525`。只在本机解包并使用 RK14 签名材料，临时私钥已清理；服务器只接收签名 APK 和公开验证信息。
+- 使用说明见 [IDENTITY_UPGRADE.md](IDENTITY_UPGRADE.md)，配置见 [fingerprint.identity.json](../examples/fingerprint.identity.json)，设备检查页见 [identity-smoke.html](../tests/identity-smoke.html)。
+- 未接入 Android 测试设备。本次不宣称真机安装、首屏/Worker 地区、Canvas/WebGL/PBO、字体/语音播放或真实代理出口抓包已通过；这些路径已完成 Android 编译，并提供可执行的设备检查页。浮点/HDR/部分透明图像等保持原生，代理域名在远端解析的内网限制仍由代理服务保障。
+- 多环境隔离、环境管理和自动化按要求不加入。
+
 ## 按出口 IP 分配地理位置
 
 - 源码提交：`9f4b898a58ed183a1fabb060a39b4eeac8eefae4`；源码树：`1bdf1045027a1b877478aa05e71445b486282a80`。

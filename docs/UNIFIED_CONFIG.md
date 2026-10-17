@@ -27,7 +27,7 @@ WebView 在宿主进程初始化时自动读取固定路径：
 }
 ```
 
-保存为 UTF-8 JSON。完整示例见 [fingerprint.json](../examples/fingerprint.json)。三个顶层字段均为必填，不能增加其他顶层字段。`settings` 字段不带 `chromium.` 前缀，大小写敏感。数字 / 布尔值使用 JSON 原生类型，不能写成字符串。完整字段清单和范围见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
+保存为 UTF-8 JSON。完整示例见 [fingerprint.example.json](../examples/fingerprint.json)。三个顶层字段均为必填，不能增加其他顶层字段。`settings` 字段不带 `chromium.` 前缀，大小写敏感。数字 / 布尔值使用 JSON 原生类型，不能写成字符串。旧字段清单见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)，本次新增的稳定指纹、地区、认证与网络控制见 [IDENTITY_UPGRADE.md](IDENTITY_UPGRADE.md)。
 
 ## brands 自动生成
 
@@ -49,7 +49,7 @@ WebView 在宿主进程初始化时自动读取固定路径：
 {"version":1,"enabled":true,"settings":{"network.proxy":"socks5://192.0.2.1:1080"}}
 ```
 
-把示例地址换成设备可达的代理；也支持单个 `http://` / `https://` 端点，尚不支持用户名密码认证。省略 network.proxy 时使用原生网络。代理模式会限制非代理 UDP、拒绝 WebTransport 并停用旧 ICE/SDP 文本改写，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md)。
+把示例地址换成设备可达的代理；也支持单个 `http://` / `https://` 端点，账号密码通过 `network.proxy_username` / `network.proxy_password` 提供，也支持 `network.proxy_api` 自动获取。代理字段均省略时使用原生网络。代理模式会限制非代理 UDP、拒绝 WebTransport 并停用旧 ICE/SDP 文本改写，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md)。
 
 恢复默认配置，可以删除文件，或保存：
 
@@ -61,8 +61,6 @@ WebView 在宿主进程初始化时自动读取固定路径：
 
 
 ## 按出口 IP 分配地理位置
-
-可直接使用 [fingerprint-ip.json](../examples/fingerprint-ip.json)。
 
 在 settings 中启用：
 
@@ -81,9 +79,9 @@ WebView 在宿主进程初始化时自动读取固定路径：
 - 服务会看到本次查询的出口 IP；不发送 Cookie、GPS 或 Wi-Fi 扫描数据，不跟随重定向。请求超时 10 秒，响应最多 65536 字节，不记录 URL / API Key / IP / 坐标日志。
 - `geolocation.accuracy` 为报告半径，单位米，范围 1000..10000000，默认 50000。IP 数据库只能提供近似位置，该数值不保证数据库具备对应真实精度。
 - 查询完成前，定位绑定进入等待队列。成功或失败时均先设置原生 GeolocationContext 的 override，再绑定请求；失败返回 POSITION_UNAVAILABLE，不启用系统 GPS 作为后备。
-- 同一 WebContents 的成功结果固定保存到该 WebContents 销毁。查询失败后，新定位请求可在 30 秒冷却结束后重试；同时到来的请求合并为一次查询。修改启动配置仍需完整重启宿主进程。
+- 本次进程共用一份 IP 数据，坐标与自动语言/时区复用同一次查询。只启用 IP 定位时，失败的新定位请求可在 30 秒冷却后重试；自动地区模式固定该次身份数据。修改配置需完整重启宿主进程。
 - 原生 getCurrentPosition / watchPosition 接口及权限撤销流程保留；DevTools 定位 override 清除后恢复 IP 模式。
-- 本次只接入地理位置，未同步修改语言或时区，亦不提供持续跟踪移动位置。
+- 设置 `regional.mode=ip` 后语言、时区与坐标联动；不提供持续跟踪移动位置。详见 [IDENTITY_UPGRADE.md](IDENTITY_UPGRADE.md)。
 
 参考 [VirtualBrowser worker](https://github.com/Virtual-Browser/VirtualBrowser/blob/0c6e8ab41b15fedc7a125b7c4314faa974dd87a9/worker/src/App.vue#L102) 的“出口查询结果 → location”流程独立实现。该仓库公开前端调用 setIpGeo，未公开其 Chromium 内核处理源码，本实现未复制其内核代码。
 
@@ -92,7 +90,7 @@ WebView 在宿主进程初始化时自动读取固定路径：
 - 宿主浏览器进程加载 WebView 原生库并完成 JNI 初始化后立即读取一次，再冻结配置；早于后续浏览器启动和网络上下文创建。renderer 不访问外部存储，只接收浏览器传递的快照。
 - 文件必须是普通文件，大小为 1..32768 字节。按一个文件描述符读取，限制最大读入大小；目录、FIFO、空文件和超大文件被拒绝。单项字符串最多 4096 字节。
 - 文件不存在：保留默认配置，记录 INFO；不会创建目录或示例文件。
-- 无读取权限、读取失败、内容非法、字段未知或数值越界：整份拒绝，保持默认配置并记录 ERROR，不输出配置内容。若文件里的代理配置有误，整份文件不会生效。
+- 无读取权限、读取失败、内容非法、字段未知或数值越界：整份拒绝，安装阻止网络的配置并记录 ERROR，不输出配置内容，避免静默使用真实网络。文件缺失仍使用原生默认配置。
 - 配置在进程中保持不变。修改或创建文件后，必须完整退出并重启宿主 App；只刷新页面或重启 renderer 不会重新读取。
 - 建议用临时文件写完后原子替换正式文件，避免启动正好读到写入中的内容。
 - 当前作用范围为宿主进程。不同宿主进程读取同一路径，并各自保存启动时快照；尚不能为同一进程的多个 WebView Profile 指定独立文件。

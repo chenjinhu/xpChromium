@@ -1,0 +1,572 @@
+From 7989b6ca197ff3cd7b1757385f66da969ab7edd3 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sun, 18 Oct 2026 01:28:24 +0800
+Subject: [PATCH] Keep regional Accept-Language consistent for all WebView
+ requests
+
+Synchronize renderer language preferences and await NetworkContext acknowledgement before resuming navigation. Enforce resolved Accept-Language in both the native request delegate and WebView final header overrides so subresources, fetch, redirects and Workers share the configured regional identity. Native mode preserves existing headers.
+
+Validate real ICU/header formatting, the production WebView override, and 43 native authentication/transport/request-header cases.
+
+diff --git a/android_webview/browser/aw_browser_context.cc b/android_webview/browser/aw_browser_context.cc
+index 27c0e8d203be9d3b93bb265d770eddae11959df2..aa0eb956fc54a9a672fbd1b0af2fcc6e294769d4 100644
+--- a/android_webview/browser/aw_browser_context.cc
++++ b/android_webview/browser/aw_browser_context.cc
+@@ -633,6 +633,11 @@ void AwBrowserContext::ConfigureNetworkContextParams(
+ 
+   context_params->initial_ssl_config = network::mojom::SSLConfig::New();
+   const blink::WebViewPropertyOverrides identity;
++  const auto regional_mode = identity.GetString("chromium.regional.mode");
++  context_params->identity_force_accept_language =
++      regional_mode == "ip" ||
++      (regional_mode == "manual" &&
++       !identity.GetStringList("chromium.regional.languages").empty());
+   context_params->identity_block_local =
+       identity.GetBool("chromium.network.block_local").value_or(false);
+   for (int port : identity.GetIntegerList("chromium.network.blocked_ports")) {
+diff --git a/android_webview/browser/aw_identity_coordinator.cc b/android_webview/browser/aw_identity_coordinator.cc
+index a6e04ea67bf7a338e7d556b33b8e26a8ded052c7..1f22ad93139df8472156145eb2374e825c7882d3 100644
+--- a/android_webview/browser/aw_identity_coordinator.cc
++++ b/android_webview/browser/aw_identity_coordinator.cc
+@@ -22,6 +22,7 @@
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
+ #include "services/network/public/cpp/simple_url_loader.h"
+ #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+ #include "third_party/blink/public/common/webview/property_overrides.h"
+ #include "third_party/blink/public/common/webview/regional_settings.h"
+ namespace android_webview {
+@@ -217,18 +218,20 @@ void AwIdentityCoordinator::ApplyNetwork(
+   auto* context = Partition(contents)->GetNetworkContext();
+   const auto regional = blink::GetWebViewRegionalSettings();
+   if (!regional->languages.empty()) {
+-    context->SetAcceptLanguage(net::HttpUtil::GenerateAcceptLanguageHeader(
+-        base::JoinString(regional->languages, ",")));
+-  }
+-  if (AwNetworkPropertyPolicy::Get().proxy_config()) {
+-    context->SetProxyAuthentication(
+-        AwProxyConfigMonitor::GetInstance()->IdentityAuthentication(),
+-        base::BindOnce(std::move(callback),
+-                       AwNetworkPropertyPolicy::Get().proxy_is_valid()));
+-  } else {
+-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+-        FROM_HERE, base::BindOnce(std::move(callback), true));
++    contents->GetMutableRendererPrefs()->accept_languages =
++        base::JoinString(regional->languages, ",");
++    contents->SyncRendererPrefs();
++    context->SetAcceptLanguage(*blink::GetWebViewRegionalAcceptLanguage());
+   }
++  const auto& policy = AwNetworkPropertyPolicy::Get();
++  // Always await an acknowledgement on this same NetworkContext pipe, so its
++  // SetAcceptLanguage is applied before any page or Worker request is resumed.
++  context->SetProxyAuthentication(
++      policy.proxy_config()
++          ? AwProxyConfigMonitor::GetInstance()->IdentityAuthentication()
++          : nullptr,
++      base::BindOnce(std::move(callback),
++                     !policy.proxy_config() || policy.proxy_is_valid()));
+ }
+ void AwIdentityCoordinator::BeginNetworkChecks() {
+   if (!active_contents_) {
+diff --git a/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc b/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc
+index 38c72d702740fee721b215a3a55699b67fbcef9a..11d8b71afe824f4371fdd3251cd313f0fd5bad39 100644
+--- a/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc
++++ b/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc
+@@ -73,6 +73,7 @@
+ #include "services/network/public/mojom/url_loader_factory.mojom-forward.h"
+ #include "third_party/blink/public/common/navigation/preloading_headers.h"
+ #include "third_party/blink/public/common/webview/property_overrides.h"
++#include "third_party/blink/public/common/webview/regional_settings.h"
+ #include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
+ #include "third_party/blink/public/mojom/origin_trials/origin_trial_feature.mojom-shared.h"
+ #include "url/gurl.h"
+@@ -1171,6 +1172,10 @@ AwProxyingURLLoaderFactory::~AwProxyingURLLoaderFactory() = default;
+ // static
+ void AwProxyingURLLoaderFactory::ApplyPropertyHeaderOverrides(
+     network::HttpRequestHeadersUpdateParams& updates) {
++  if (auto language = blink::GetWebViewRegionalAcceptLanguage()) {
++    updates.RemoveHeader("Accept-Language");
++    updates.SetHeader("Accept-Language", *language);
++  }
+   const blink::WebViewPropertyOverrides properties;
+   if (auto value = properties.RequestedWith()) {
+     const std::string key = content::GetCorsExemptRequestedWithHeaderName();
+diff --git a/net/base/identity_request_policy.cc b/net/base/identity_request_policy.cc
+index b9d5fe03d7811d3dd71ebd3e3711b5556bdb753a..f245103e28bc7d65def546b87d14f04e6d7a7784 100644
+--- a/net/base/identity_request_policy.cc
++++ b/net/base/identity_request_policy.cc
+@@ -7,8 +7,21 @@
+ 
+ #include "base/strings/string_util.h"
+ #include "net/base/ip_address.h"
++#include "net/http/http_request_headers.h"
+ #include "url/gurl.h"
+ namespace net {
++void ApplyIdentityRequestHeaders(
++    HttpRequestHeaders& headers,
++    int dnt,
++    const std::optional<std::string>& accept_language) {
++  if (dnt == 0 || dnt == 1) {
++    headers.SetHeader("DNT", dnt ? "1" : "0");
++  }
++  if (accept_language) {
++    headers.SetHeader("Accept-Language", *accept_language);
++  }
++}
++
+ bool IdentityAllowsUrl(const GURL& url,
+                        bool block_local,
+                        base::span<const uint16_t> blocked_ports) {
+diff --git a/net/base/identity_request_policy.h b/net/base/identity_request_policy.h
+index 2166a526cb1d8b54bb027ee16c96d02366764a01..fd565b6ca9ce9e33b6305c2d1c7ea1d991a4c7e1 100644
+--- a/net/base/identity_request_policy.h
++++ b/net/base/identity_request_policy.h
+@@ -5,12 +5,20 @@
+ #define NET_BASE_IDENTITY_REQUEST_POLICY_H_
+ #include <stdint.h>
+ 
++#include <optional>
++#include <string>
++
+ #include "base/containers/span.h"
+ #include "net/base/net_export.h"
+ class GURL;
+ namespace net {
++class HttpRequestHeaders;
++NET_EXPORT void ApplyIdentityRequestHeaders(
++    HttpRequestHeaders& headers,
++    int dnt,
++    const std::optional<std::string>& accept_language);
+ NET_EXPORT bool IdentityAllowsUrl(const GURL& url,
+                                   bool block_local,
+                                   base::span<const uint16_t> blocked_ports);
+-}
++}  // namespace net
+ #endif
+diff --git a/services/network/network_context.cc b/services/network/network_context.cc
+index bdf0ee71f7496c2a788cb8314577e0e9328d18d8..d33eae7f83b4477a6c111959b1fc2e497b3ec6bc 100644
+--- a/services/network/network_context.cc
++++ b/services/network/network_context.cc
+@@ -2739,6 +2739,14 @@ void NetworkContext::LoadHttpAuthCacheProxyEntries(
+   std::move(callback).Run();
+ }
+ 
++std::optional<std::string> NetworkContext::IdentityAcceptLanguage() const {
++  if (params_ && params_->identity_force_accept_language &&
++      user_agent_settings_) {
++    return user_agent_settings_->GetAcceptLanguage();
++  }
++  return std::nullopt;
++}
++
+ bool NetworkContext::IsIdentityAddressAllowed(
+     const net::IPAddress& address) const {
+   return !IdentityBlockLocalNetwork() || address.IsPubliclyRoutable();
+diff --git a/services/network/network_context.h b/services/network/network_context.h
+index bd27e8b9256ff148ab01250e57586d335e7b794c..3b03b2045b697fc821687bdf380ea14dc9ab87c5 100644
+--- a/services/network/network_context.h
++++ b/services/network/network_context.h
+@@ -220,6 +220,7 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) NetworkContext
+   }
+   bool IsIdentityUrlAllowed(const GURL& url) const;
+   bool IsIdentityAddressAllowed(const net::IPAddress& address) const;
++  std::optional<std::string> IdentityAcceptLanguage() const;
+   int IdentityDoNotTrack() const {
+     return params_ ? params_->identity_do_not_track : -1;
+   }
+diff --git a/services/network/network_service_network_delegate.cc b/services/network/network_service_network_delegate.cc
+index b383615aab070885bf1baf17c11c972e46cb6069..aa19e63366fad5d6b5b592891ebfa219b388a0b9 100644
+--- a/services/network/network_service_network_delegate.cc
++++ b/services/network/network_service_network_delegate.cc
+@@ -17,11 +17,13 @@
+ #include "build/build_config.h"
+ #include "components/domain_reliability/monitor.h"
+ #include "net/base/features.h"
++#include "net/base/identity_request_policy.h"
+ #include "net/base/isolation_info.h"
+ #include "net/base/load_flags.h"
+ #include "net/base/net_errors.h"
+ #include "net/cookies/cookie_setting_override.h"
+ #include "net/cookies/cookie_util.h"
++#include "net/http/http_request_headers.h"
+ #include "net/url_request/clear_site_data.h"
+ #include "net/url_request/referrer_policy.h"
+ #include "net/url_request/url_request.h"
+@@ -104,9 +106,12 @@ int NetworkServiceNetworkDelegate::OnBeforeURLRequest(
+   if (!network_context_->IsIdentityUrlAllowed(*effective_url)) {
+     return net::ERR_BLOCKED_BY_ADMINISTRATOR;
+   }
+-  const int dnt = network_context_->IdentityDoNotTrack();
+-  if (dnt == 0 || dnt == 1) {
+-    request->SetExtraRequestHeaderByName("DNT", dnt ? "1" : "0", true);
++  net::HttpRequestHeaders identity_headers;
++  net::ApplyIdentityRequestHeaders(identity_headers,
++                                   network_context_->IdentityDoNotTrack(),
++                                   network_context_->IdentityAcceptLanguage());
++  for (net::HttpRequestHeaders::Iterator it(identity_headers); it.GetNext();) {
++    request->SetExtraRequestHeaderByName(it.name(), it.value(), true);
+   }
+   MaybeTruncateReferrer(request, *effective_url);
+ 
+diff --git a/services/network/public/mojom/network_context.mojom b/services/network/public/mojom/network_context.mojom
+index 24ef19c7610dc7dc7075cfe634cccdd9df77db6c..d1b884d7a9ed3284f6207c229a5c8da095776dcd 100644
+--- a/services/network/public/mojom/network_context.mojom
++++ b/services/network/public/mojom/network_context.mojom
+@@ -360,6 +360,7 @@ struct ProxyAuthentication {
+ struct NetworkContextParams {
+   ProxyAuthentication? proxy_authentication;
+   bool identity_block_local = false;
++  bool identity_force_accept_language = false;
+   array<uint16> identity_blocked_ports;
+   // -1 preserves native DNT policy; 0/1 explicitly sends that value.
+   int32 identity_do_not_track = -1;
+diff --git a/third_party/blink/common/webview/regional_settings.cc b/third_party/blink/common/webview/regional_settings.cc
+index 65de57bdf9830cfc2fd38d56dabdd50e9526443e..57183caa774336e968cbad6a49026d99f5b05616 100644
+--- a/third_party/blink/common/webview/regional_settings.cc
++++ b/third_party/blink/common/webview/regional_settings.cc
+@@ -9,6 +9,7 @@
+ #include "base/no_destructor.h"
+ #include "base/strings/string_util.h"
+ #include "base/synchronization/lock.h"
++#include "net/http/http_util.h"
+ namespace blink {
+ namespace {
+ struct RegionalStore {
+@@ -83,4 +84,12 @@ std::shared_ptr<const WebViewRegionalSettings> GetWebViewRegionalSettings() {
+   base::AutoLock lock(store.lock);
+   return store.value;
+ }
++std::optional<std::string> GetWebViewRegionalAcceptLanguage() {
++  const auto regional = GetWebViewRegionalSettings();
++  if (regional->languages.empty()) {
++    return std::nullopt;
++  }
++  return net::HttpUtil::GenerateAcceptLanguageHeader(
++      base::JoinString(regional->languages, ","));
++}
+ }  // namespace blink
+diff --git a/third_party/blink/public/common/webview/regional_settings.h b/third_party/blink/public/common/webview/regional_settings.h
+index e1cdec038c10056d202d1aada023dec3df22e850..8c0ce0e3b4b7e9d837eb2c603668efa51dca2865 100644
+--- a/third_party/blink/public/common/webview/regional_settings.h
++++ b/third_party/blink/public/common/webview/regional_settings.h
+@@ -4,6 +4,7 @@
+ #ifndef THIRD_PARTY_BLINK_PUBLIC_COMMON_WEBVIEW_REGIONAL_SETTINGS_H_
+ #define THIRD_PARTY_BLINK_PUBLIC_COMMON_WEBVIEW_REGIONAL_SETTINGS_H_
+ #include <memory>
++#include <optional>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+@@ -22,5 +23,7 @@ BLINK_COMMON_EXPORT bool SetWebViewRegionalSettings(
+     WebViewRegionalSettings settings);
+ BLINK_COMMON_EXPORT std::shared_ptr<const WebViewRegionalSettings>
+ GetWebViewRegionalSettings();
++BLINK_COMMON_EXPORT std::optional<std::string>
++GetWebViewRegionalAcceptLanguage();
+ }  // namespace blink
+ #endif
+diff --git a/webview_custom/BUILD.gn b/webview_custom/BUILD.gn
+index 4bca76fbf571670028e3c116316bc5e89d927df6..46836b3f566a0b7dcd8e9a798dfe873c9705c3d3 100644
+--- a/webview_custom/BUILD.gn
++++ b/webview_custom/BUILD.gn
+@@ -16,6 +16,7 @@ executable("fingerprint_config_test") {
+   deps = [
+     "//base",
+     "//base:i18n",
++    "//net",
+     "//third_party/icu",
+     "//url",
+   ]
+diff --git a/webview_custom/IDENTITY_UPGRADE.md b/webview_custom/IDENTITY_UPGRADE.md
+index 745c21e686f3f7f698251a9db43ed2769710d9dc..943e97c1c140ff59fec3e3149c231f3ed5126f02 100644
+--- a/webview_custom/IDENTITY_UPGRADE.md
++++ b/webview_custom/IDENTITY_UPGRADE.md
+@@ -78,7 +78,7 @@ socks5://proxy.example:1080
+ 
+ IP 查询沿用 `geolocation.endpoint`，缺省 `https://ipwho.is/`。地区解析支持 `timezone.id`、`time_zone.name`、`timezone` 字符串；语言优先使用 `languages` 列表或逗号分隔字符串，否则由 `country_code` / `countryCode` 和 ICU 推导该国家的主要语言。国家推导是默认语言选择，不等于识别用户个人语言。
+ 
+-`regional.mode=ip` 会在发出页面请求前等待地区数据，在页面提交前等待 renderer 应用成功。失败会阻止该次导航，不静默使用本地时区。`geolocation.mode=ip` 复用相同 IP 数据，保留 Android/WebView 定位授权流程，失败返回位置不可用，不启动 GPS。只开 IP 定位而不启用自动地区时，定位失败不阻止普通页面。
++`regional.mode=ip` 会在发出页面请求前等待地区数据，在页面提交前等待 renderer 应用成功。语言同时同步 renderer 偏好，并在网络上下文和 WebView 最终请求头覆盖处强制应用，覆盖导航、子资源、fetch 和 Worker 请求。失败会阻止该次导航，不静默使用本地时区。`geolocation.mode=ip` 复用相同 IP 数据，保留 Android/WebView 定位授权流程，失败返回位置不可用，不启动 GPS。只开 IP 定位而不启用自动地区时，定位失败不阻止普通页面。
+ 
+ API/健康检查/IP 查询各有 10 秒超时，整个准备流程有 40 秒超时；失败重试至少间隔 30 秒。代理账号、密码、API 地址和 IP 查询地址不会进入 renderer 命令行；日志不输出这些响应或坐标。运行进程的身份固定，代理供应商仍需提供稳定出口；按连接轮换出口的代理无法靠一次 IP 查询保证后续请求保持相同地区。
+ 
+diff --git a/webview_custom/tests/identity_data_test.cc b/webview_custom/tests/identity_data_test.cc
+index fb8b17b2a160e32cdee3c9a63fc60d0d41d6ea95..20e7d8d63a23e30afd30110781f7a92bcd53b210 100644
+--- a/webview_custom/tests/identity_data_test.cc
++++ b/webview_custom/tests/identity_data_test.cc
+@@ -36,6 +36,7 @@ int main() {
+       blink::SetWebViewRegionalSettings({{"en-US", "en"}, "America/New_York"}));
+   CHECK(!blink::SetWebViewRegionalSettings({{"en_US"}, "UTC"}));
+   CHECK_EQ(blink::GetWebViewRegionalSettings()->languages.front(), "en-US");
++  CHECK(blink::GetWebViewRegionalAcceptLanguage() == "en-US,en;q=0.9");
+   std::cout << "PASS proxy API validation, IP region parsing, ICU "
+                "languages/timezones and immutable regional store\n";
+ }
+diff --git a/webview_custom/tests/network_session_identity_test.cc b/webview_custom/tests/network_session_identity_test.cc
+index e29e9bd4ce2af44a124bda7188642a952cb3565e..477c90be7d345fa9e06614bfcdf697529dee3160 100644
+--- a/webview_custom/tests/network_session_identity_test.cc
++++ b/webview_custom/tests/network_session_identity_test.cc
+@@ -119,6 +119,21 @@ TEST_F(NetworkSessionIdentityTest, ChallengeCredentialsAreProxyOnlyAndBounded) {
+             OK);
+   EXPECT_FALSE(origin->HaveAuth());
+ }
++TEST_F(NetworkSessionIdentityTest,
++       RequestHeadersStayNativeOrUseResolvedIdentity) {
++  HttpRequestHeaders headers;
++  headers.SetHeader("Accept-Language", "fr-FR");
++  headers.SetHeader("DNT", "original");
++  ApplyIdentityRequestHeaders(headers, -1, std::nullopt);
++  EXPECT_EQ(headers.GetHeader("Accept-Language"), "fr-FR");
++  EXPECT_EQ(headers.GetHeader("DNT"), "original");
++  ApplyIdentityRequestHeaders(headers, 1, std::string("zh-CN,zh;q=0.9"));
++  EXPECT_EQ(headers.GetHeader("Accept-Language"), "zh-CN,zh;q=0.9");
++  EXPECT_EQ(headers.GetHeader("DNT"), "1");
++  ApplyIdentityRequestHeaders(headers, 0, std::nullopt);
++  EXPECT_EQ(headers.GetHeader("DNT"), "0");
++  EXPECT_EQ(headers.GetHeader("Accept-Language"), "zh-CN,zh;q=0.9");
++}
+ TEST_F(NetworkSessionIdentityTest, NativeAndRestrictedUrls) {
+   const uint16_t ports[] = {22, 3389};
+   for (const char* url :
+diff --git a/webview_custom/tests/property_overrides_test.cc b/webview_custom/tests/property_overrides_test.cc
+index f214e9e1a0d830791bf7434dad6896538328eb40..abb6020862346db4c6a3de15f57336562de43383 100644
+--- a/webview_custom/tests/property_overrides_test.cc
++++ b/webview_custom/tests/property_overrides_test.cc
+@@ -2,95 +2,170 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-
+ #include "third_party/blink/public/common/webview/property_overrides.h"
++
+ #include <sys/system_properties.h>
+-#include <array>
+-#include <cmath>
++
+ #include <algorithm>
++#include <array>
+ #include <cassert>
+-#include <span>
++#include <cmath>
+ #include <limits>
++#include <span>
++
++#include "third_party/blink/public/common/webview/regional_settings.h"
++// Native store/ICU formatting is tested separately; this boundary supplies
++// resolved values to the extracted production WebView header override method.
++namespace blink {
++std::optional<std::string> test_regional_header;
++std::optional<std::string> GetWebViewRegionalAcceptLanguage() {
++  return test_regional_header;
++}
++}  // namespace blink
+ using namespace blink::webview;
+ using blink::WebViewPropertyOverrides;
+-void set(const char* name, const char* value) { props[name] = {name,value}; }
++void set(const char* name, const char* value) {
++  props[name] = {name, value};
++}
+ namespace network {
+ struct HttpRequestHeadersUpdateParams {
+   std::vector<std::string> operations;
+-  void RemoveHeader(std::string_view key) { operations.push_back("remove:"+std::string(key)); }
+-  void SetCorsExemptHeader(std::string_view key,std::string_view value) { operations.push_back("cors:"+std::string(key)+"="+std::string(value)); }
+-  void SetHeader(std::string_view key,std::string_view value) { operations.push_back("set:"+std::string(key)+"="+std::string(value)); }
++  void RemoveHeader(std::string_view key) {
++    operations.push_back("remove:" + std::string(key));
++  }
++  void SetCorsExemptHeader(std::string_view key, std::string_view value) {
++    operations.push_back("cors:" + std::string(key) + "=" + std::string(value));
++  }
++  void SetHeader(std::string_view key, std::string_view value) {
++    operations.push_back("set:" + std::string(key) + "=" + std::string(value));
++  }
+ };
++}  // namespace network
++namespace net {
++struct HttpRequestHeaders {
++  static constexpr char kUserAgent[] = "User-Agent";
++};
++}  // namespace net
++namespace content {
++std::string GetCorsExemptRequestedWithHeaderName() {
++  return "X-Requested-With";
+ }
+-namespace net { struct HttpRequestHeaders { static constexpr char kUserAgent[]="User-Agent"; }; }
+-namespace content { std::string GetCorsExemptRequestedWithHeaderName(){return "X-Requested-With";} }
++}  // namespace content
+ namespace android_webview {
+ struct AwProxyingURLLoaderFactory {
+- static void ApplyPropertyHeaderOverrides(network::HttpRequestHeadersUpdateParams&);
++  static void ApplyPropertyHeaderOverrides(
++      network::HttpRequestHeadersUpdateParams&);
+ };
+ PRODUCTION_HEADER_POLICY
+-}
+-using HeaderUpdates=network::HttpRequestHeadersUpdateParams;
++}  // namespace android_webview
++using HeaderUpdates = network::HttpRequestHeadersUpdateParams;
+ using android_webview::AwProxyingURLLoaderFactory;
+ int main() {
+-  assert(!WebViewPropertyOverrides().enabled()); assert(!WebViewPropertyOverrides().RequestedWith());
+-  set("chromium.config.x_requested_with","replacement");
++  assert(!WebViewPropertyOverrides().enabled());
++  assert(!WebViewPropertyOverrides().RequestedWith());
++  set("chromium.config.x_requested_with", "replacement");
++  assert(!WebViewPropertyOverrides().RequestedWith());
++  set("chromium.enable", "1");
++  assert(WebViewPropertyOverrides().RequestedWith() == "replacement");
++  HeaderUpdates replacement;
++  AwProxyingURLLoaderFactory::ApplyPropertyHeaderOverrides(replacement);
++  assert((replacement.operations ==
++          std::vector<std::string>{"remove:X-Requested-With",
++                                   "cors:X-Requested-With=replacement"}));
++  set("chromium.config.x_requested_with", "");
++  assert(WebViewPropertyOverrides().RequestedWith() == "");
++  HeaderUpdates removal;
++  AwProxyingURLLoaderFactory::ApplyPropertyHeaderOverrides(removal);
++  assert((removal.operations ==
++          std::vector<std::string>{"remove:X-Requested-With"}));
++  set("chromium.config.x_requested_with", "-");
++  assert(!WebViewPropertyOverrides().RequestedWith());
++  set("chromium.config.x_requested_with", "bad\r\nInjected: yes");
+   assert(!WebViewPropertyOverrides().RequestedWith());
+-  set("chromium.enable","1"); assert(WebViewPropertyOverrides().RequestedWith() == "replacement");
+-  HeaderUpdates replacement; AwProxyingURLLoaderFactory::ApplyPropertyHeaderOverrides(replacement);
+-  assert((replacement.operations==std::vector<std::string>{"remove:X-Requested-With","cors:X-Requested-With=replacement"}));
+-  set("chromium.config.x_requested_with",""); assert(WebViewPropertyOverrides().RequestedWith() == "");
+-  HeaderUpdates removal; AwProxyingURLLoaderFactory::ApplyPropertyHeaderOverrides(removal);
+-  assert((removal.operations==std::vector<std::string>{"remove:X-Requested-With"}));
+-  set("chromium.config.x_requested_with","-"); assert(!WebViewPropertyOverrides().RequestedWith());
+-  set("chromium.config.x_requested_with","bad\r\nInjected: yes");
++  props.erase("chromium.config.x_requested_with");
+   assert(!WebViewPropertyOverrides().RequestedWith());
+-  props.erase("chromium.config.x_requested_with"); assert(!WebViewPropertyOverrides().RequestedWith());
+-  for (const char* invalid : {"NaN","inf","-1","999999999999999999999","12x"," 12"}) {
+-    set("number",invalid); assert(!WebViewPropertyOverrides().GetInt("number",0,100));
+-    assert(!WebViewPropertyOverrides().GetDouble("number",0,100));
++  blink::test_regional_header = "zh-CN,zh;q=0.9";
++  HeaderUpdates regional;
++  AwProxyingURLLoaderFactory::ApplyPropertyHeaderOverrides(regional);
++  assert((regional.operations ==
++          std::vector<std::string>{"remove:Accept-Language",
++                                   "set:Accept-Language=zh-CN,zh;q=0.9"}));
++  blink::test_regional_header.reset();
++  for (const char* invalid :
++       {"NaN", "inf", "-1", "999999999999999999999", "12x", " 12"}) {
++    set("number", invalid);
++    assert(!WebViewPropertyOverrides().GetInt("number", 0, 100));
++    assert(!WebViewPropertyOverrides().GetDouble("number", 0, 100));
+   }
+-  set("number","12"); assert(WebViewPropertyOverrides().GetInt("number",0,100)==12);
+-  set("number","0.5"); assert(WebViewPropertyOverrides().GetDouble("number",0,1)==0.5);
+-  set("boolean","0"); assert(WebViewPropertyOverrides().GetBool("boolean")==false);
+-  set("boolean","true"); assert(WebViewPropertyOverrides().GetBool("boolean")==true);
+-  set("boolean","nope"); assert(!WebViewPropertyOverrides().GetBool("boolean"));
+-  set("chromium.navigator.useragent","Mozilla/5.0 test");
+-  assert(WebViewPropertyOverrides().UserAgent()=="Mozilla/5.0 test");
+-  set("chromium.navigator.useragent","\nbad"); assert(!WebViewPropertyOverrides().UserAgent());
+-  set("brands","A,158&B,1"); assert(WebViewPropertyOverrides().Brands("brands").size()==2);
+-  for (const char* invalid : {"broken","A,1&","A,1&B","A,1,2",",1","\xC3\xA9,1"}) {
+-    set("brands",invalid); assert(WebViewPropertyOverrides().Brands("brands").empty());
++  set("number", "12");
++  assert(WebViewPropertyOverrides().GetInt("number", 0, 100) == 12);
++  set("number", "0.5");
++  assert(WebViewPropertyOverrides().GetDouble("number", 0, 1) == 0.5);
++  set("boolean", "0");
++  assert(WebViewPropertyOverrides().GetBool("boolean") == false);
++  set("boolean", "true");
++  assert(WebViewPropertyOverrides().GetBool("boolean") == true);
++  set("boolean", "nope");
++  assert(!WebViewPropertyOverrides().GetBool("boolean"));
++  set("chromium.navigator.useragent", "Mozilla/5.0 test");
++  assert(WebViewPropertyOverrides().UserAgent() == "Mozilla/5.0 test");
++  set("chromium.navigator.useragent", "\nbad");
++  assert(!WebViewPropertyOverrides().UserAgent());
++  set("brands", "A,158&B,1");
++  assert(WebViewPropertyOverrides().Brands("brands").size() == 2);
++  for (const char* invalid :
++       {"broken", "A,1&", "A,1&B", "A,1,2", ",1", "\xC3\xA9,1"}) {
++    set("brands", invalid);
++    assert(WebViewPropertyOverrides().Brands("brands").empty());
+   }
+-  assert(IsIPv4("192.0.2.7")); assert(!IsIPv4("999.0.0.1"));
+-  assert(!IsIPv4("1.2.3")); assert(!IsIPv4("1.2.3.4.5"));
+-  set("chromium.webrtc.public_ip","203.0.113.5");
+-  set("chromium.webrtc.private_ip","192.168.2.10");
+-  auto srflx = WebViewPropertyOverrides().IceCandidate("candidate:1 1 udp 1 198.51.100.7 4567 typ srflx raddr 10.0.0.1 rport 1234");
+-  assert(srflx=="candidate:1 1 udp 1 203.0.113.5 4567 typ srflx raddr 192.168.2.10 rport 1234");
+-  assert(WebViewPropertyOverrides().IceCandidate("candidate:2 1 udp 1 abc.local 1 typ host")=="candidate:2 1 udp 1 abc.local 1 typ host");
+-  assert(WebViewPropertyOverrides().IceCandidate("")=="");
+-  std::string sdp="v=0\r\nc=IN IP4 198.51.100.7\r\na=candidate:1 1 udp 1 10.0.0.1 5 typ host\r\nm=audio 9 UDP 1\r\n";
+-  assert(WebViewPropertyOverrides().RedactSdp(sdp)==sdp);
+-  set("chromium.webrtc.sdp_redact","1");
+-  assert(WebViewPropertyOverrides().RedactSdp(sdp)=="v=0\r\nc=IN IP4 0.0.0.0\r\nm=audio 9 UDP 1\r\n");
+-  std::array<float,4> data={0,0.1f,-0.2f,std::numeric_limits<float>::infinity()};
+-  assert(PerturbAudio(std::span(data),10));
+-  assert(data[0]==0 && std::abs(data[1]-0.10001f)<1e-7f);
++  assert(IsIPv4("192.0.2.7"));
++  assert(!IsIPv4("999.0.0.1"));
++  assert(!IsIPv4("1.2.3"));
++  assert(!IsIPv4("1.2.3.4.5"));
++  set("chromium.webrtc.public_ip", "203.0.113.5");
++  set("chromium.webrtc.private_ip", "192.168.2.10");
++  auto srflx = WebViewPropertyOverrides().IceCandidate(
++      "candidate:1 1 udp 1 198.51.100.7 4567 typ srflx raddr 10.0.0.1 rport "
++      "1234");
++  assert(srflx ==
++         "candidate:1 1 udp 1 203.0.113.5 4567 typ srflx raddr 192.168.2.10 "
++         "rport 1234");
++  assert(WebViewPropertyOverrides().IceCandidate(
++             "candidate:2 1 udp 1 abc.local 1 typ host") ==
++         "candidate:2 1 udp 1 abc.local 1 typ host");
++  assert(WebViewPropertyOverrides().IceCandidate("") == "");
++  std::string sdp =
++      "v=0\r\nc=IN IP4 198.51.100.7\r\na=candidate:1 1 udp 1 10.0.0.1 5 typ "
++      "host\r\nm=audio 9 UDP 1\r\n";
++  assert(WebViewPropertyOverrides().RedactSdp(sdp) == sdp);
++  set("chromium.webrtc.sdp_redact", "1");
++  assert(WebViewPropertyOverrides().RedactSdp(sdp) ==
++         "v=0\r\nc=IN IP4 0.0.0.0\r\nm=audio 9 UDP 1\r\n");
++  std::array<float, 4> data = {0, 0.1f, -0.2f,
++                               std::numeric_limits<float>::infinity()};
++  assert(PerturbAudio(std::span(data), 10));
++  assert(data[0] == 0 && std::abs(data[1] - 0.10001f) < 1e-7f);
+   assert(std::isinf(data[3]));
+-  std::array<float,4> silence={}; assert(!PerturbAudio(std::span(silence),1));
+-  set("chromium.enable","0"); assert(!WebViewPropertyOverrides().GetInt("number",0,100));
+-  assert(WebViewPropertyOverrides().IceCandidate("candidate:3 1 udp 1 10.0.0.1 5 typ host ")=="candidate:3 1 udp 1 10.0.0.1 5 typ host ");
+-  assert(WebViewPropertyOverrides().RedactSdp(sdp)==sdp);
++  std::array<float, 4> silence = {};
++  assert(!PerturbAudio(std::span(silence), 1));
++  set("chromium.enable", "0");
++  assert(!WebViewPropertyOverrides().GetInt("number", 0, 100));
++  assert(WebViewPropertyOverrides().IceCandidate(
++             "candidate:3 1 udp 1 10.0.0.1 5 typ host ") ==
++         "candidate:3 1 udp 1 10.0.0.1 5 typ host ");
++  assert(WebViewPropertyOverrides().RedactSdp(sdp) == sdp);
+ 
+-  std::array<uint8_t,16> pixels={10,20,30,255, 99,99,99,255, 1,2,3,255, 99,99,99,255};
+-  auto selected=CanvasNoiseByteIndex(pixels,1,2,8,1);
+-  assert(selected && (*selected==0 || *selected==8));
+-  assert(selected==CanvasNoiseByteIndex(pixels,1,2,8,1));
+-  assert(!CanvasNoiseByteIndex(pixels,0,2,8,1));
+-  assert(!CanvasNoiseByteIndex(pixels,2,3,8,1));
+-  assert(!CanvasNoiseByteIndex(pixels,1,2,3,1));
+-  assert(!CanvasNoiseByteIndex(pixels,1,2,8,0));
+-  assert(!CanvasNoiseByteIndex(pixels,1,2,8,std::numeric_limits<double>::infinity()));
+-  assert(!CanvasNoiseByteIndex(std::span<const uint8_t>(pixels).first(8),1,2,8,1));
++  std::array<uint8_t, 16> pixels = {10, 20, 30, 255, 99, 99, 99, 255,
++                                    1,  2,  3,  255, 99, 99, 99, 255};
++  auto selected = CanvasNoiseByteIndex(pixels, 1, 2, 8, 1);
++  assert(selected && (*selected == 0 || *selected == 8));
++  assert(selected == CanvasNoiseByteIndex(pixels, 1, 2, 8, 1));
++  assert(!CanvasNoiseByteIndex(pixels, 0, 2, 8, 1));
++  assert(!CanvasNoiseByteIndex(pixels, 2, 3, 8, 1));
++  assert(!CanvasNoiseByteIndex(pixels, 1, 2, 3, 1));
++  assert(!CanvasNoiseByteIndex(pixels, 1, 2, 8, 0));
++  assert(!CanvasNoiseByteIndex(pixels, 1, 2, 8,
++                               std::numeric_limits<double>::infinity()));
++  assert(!CanvasNoiseByteIndex(std::span<const uint8_t>(pixels).first(8), 1, 2,
++                               8, 1));
+ }
