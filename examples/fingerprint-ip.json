@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "enabled": true,
+  "settings": {
+    "geolocation.mode": "ip",
+    "geolocation.accuracy": 50000,
+    "navigator.userAgentMeta.mobile": true,
+    "navigator.userAgentMeta.platform": "Android"
+  }
+}

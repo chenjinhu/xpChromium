@@ -10,6 +10,9 @@
 | --- | --- |
 | config.x_requested_with | 未设置：原生包名策略；非空合法字符串：替换；空字符串：删除 |
 | network.proxy | 进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。入口拒绝非法 URI，修改需重启宿主进程，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
+| geolocation.mode | native / ip；默认原生，ip 按当前 WebView 网络出口查询近似经纬度，失败返回不可用 |
+| geolocation.endpoint | HTTPS IP 查询地址，默认 https://ipwho.is/；顶层 latitude / longitude 响应格式，详见 UNIFIED_CONFIG.md |
+| geolocation.accuracy | 报告半径，单位米，1000..10000000，默认 50000；不保证数据库精度 |
 | navigator.useragent | 完整 HTTP / JS UA 字符串，最多 4096 字节；拒绝非法控制字符。不再分段 |
 | navigator.userAgentMeta.brands / fullVersionList | 可省略并自动生成；手动覆盖使用 `[{"brand":"Chromium","version":"158"}]` 数组，完整版本列表单独配置 |
 | navigator.userAgentMeta.mobile / wow64 | JSON 布尔值 true/false |

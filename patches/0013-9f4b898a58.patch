@@ -1,0 +1,934 @@
+From 9f4b898a58ed183a1fabb060a39b4eeac8eefae4 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sat, 17 Oct 2026 23:18:36 +0800
+Subject: [PATCH] Resolve WebView geolocation from its network exit IP
+
+
+diff --git a/android_webview/browser/BUILD.gn b/android_webview/browser/BUILD.gn
+index 5a1cd8475bed56089fc74d5776c243d62cebc340..7bebb68f31c3426e193645a98c9b613a43617c6b 100644
+--- a/android_webview/browser/BUILD.gn
++++ b/android_webview/browser/BUILD.gn
+@@ -100,10 +100,15 @@ source_set("browser") {
+     "aw_feature_list_creator.h",
+     "aw_field_trials.cc",
+     "aw_field_trials.h",
++    "aw_fingerprint_config.cc",
++    "aw_fingerprint_config_file.cc",
++    "aw_fingerprint_config_file.h",
+     "aw_http_auth_handler.cc",
+     "aw_http_auth_handler.h",
+     "aw_http_cache_manager.cc",
+     "aw_http_cache_manager.h",
++    "aw_ip_geolocation_context.cc",
++    "aw_ip_geolocation_context.h",
+     "aw_javascript_dialog_manager.cc",
+     "aw_javascript_dialog_manager.h",
+     "aw_metrics_service_client_delegate.cc",
+@@ -129,9 +134,6 @@ source_set("browser") {
+     "aw_quota_manager_bridge.h",
+     "aw_render_process_gone_delegate.h",
+     "aw_renderer_priority.h",
+-    "aw_fingerprint_config.cc",
+-    "aw_fingerprint_config_file.cc",
+-    "aw_fingerprint_config_file.h",
+     "aw_settings.cc",
+     "aw_settings.h",
+     "aw_speech_recognition_manager_delegate.cc",
+@@ -393,6 +395,8 @@ source_set("browser") {
+     "//net/third_party/quiche:blind_sign_auth",
+     "//services/cert_verifier/public/mojom",
+     "//services/data_decoder/public/cpp",
++    "//services/device/public/mojom",
++    "//services/device/public/mojom:device_service",
+     "//services/network/public/cpp",
+     "//services/network/public/mojom",
+     "//services/network/public/mojom:url_loader_base",
+diff --git a/android_webview/browser/DEPS b/android_webview/browser/DEPS
+index 6a861956ac3069331f96f21cede371cf9d218c2c..07ecc4d5ef8952d8bb9989f8f1e4a774cbba3258 100644
+--- a/android_webview/browser/DEPS
++++ b/android_webview/browser/DEPS
+@@ -95,6 +95,7 @@ include_rules = [
+ 
+   "+services/data_decoder/public/cpp/data_decoder.h",
+ 
++  "+services/device/public",
+   "+services/network/public",
+   # This is needed for the CookieManager to configure the CookieStore directly.
+   "+services/network/cookie_access_delegate_impl.h",
+diff --git a/android_webview/browser/aw_content_browser_client.cc b/android_webview/browser/aw_content_browser_client.cc
+index e67b854d051ce35eeee146875b343fd43b713633..800d3dc95d3444cd003c587df95b24e080759b0b 100644
+--- a/android_webview/browser/aw_content_browser_client.cc
++++ b/android_webview/browser/aw_content_browser_client.cc
+@@ -25,6 +25,7 @@
+ #include "android_webview/browser/aw_feature_list_creator.h"
+ #include "android_webview/browser/aw_http_auth_handler.h"
+ #include "android_webview/browser/aw_http_cache_manager.h"
++#include "android_webview/browser/aw_ip_geolocation_context.h"
+ #include "android_webview/browser/aw_policy_blocklist_service_factory.h"
+ #include "android_webview/browser/aw_settings.h"
+ #include "android_webview/browser/aw_speech_recognition_manager_delegate.h"
+@@ -56,9 +57,9 @@
+ #include "android_webview/common/aw_switches.h"
+ #include "android_webview/common/url_constants.h"
+ #include "base/android/yield_to_looper_checker.h"
++#include "base/base64.h"
+ #include "base/base_paths_android.h"
+ #include "base/base_switches.h"
+-#include "base/base64.h"
+ #include "base/check_deref.h"
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+@@ -110,6 +111,7 @@
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/child_process_security_policy.h"
+ #include "content/public/browser/client_certificate_delegate.h"
++#include "content/public/browser/device_service.h"
+ #include "content/public/browser/file_url_loader.h"
+ #include "content/public/browser/frame_type.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -142,6 +144,7 @@
+ #include "net/ssl/ssl_cert_request_info.h"
+ #include "net/ssl/ssl_info.h"
+ #include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
++#include "services/device/public/mojom/device_service.mojom.h"
+ #include "services/metrics/public/cpp/ukm_source_id.h"
+ #include "services/network/network_service.h"
+ #include "services/network/public/cpp/features.h"
+@@ -314,6 +317,36 @@ AwContentBrowserClient::AwContentBrowserClient(
+   DCHECK(aw_feature_list_creator_);
+ }
+ 
++device::mojom::GeolocationContext*
++AwContentBrowserClient::GetGeolocationContextOverride(
++    content::WebContents* web_contents) {
++  const blink::WebViewPropertyOverrides config;
++  if (!config.enabled() ||
++      config.GetString("chromium.geolocation.mode") != "ip") {
++    return nullptr;
++  }
++  static const char kContextKey = 0;
++  auto* context = static_cast<AwIpGeolocationContext*>(
++      web_contents->GetUserData(&kContextKey));
++  if (!context) {
++    mojo::Remote<device::mojom::GeolocationContext> device_context;
++    content::GetDeviceService().BindGeolocationContext(
++        device_context.BindNewPipeAndPassReceiver());
++    auto owned = std::make_unique<AwIpGeolocationContext>(
++        web_contents->GetPrimaryMainFrame()
++            ->GetStoragePartition()
++            ->GetURLLoaderFactoryForBrowserProcess(),
++        std::move(device_context),
++        GURL(config.GetString("chromium.geolocation.endpoint")
++                 .value_or("https://ipwho.is/")),
++        config.GetDouble("chromium.geolocation.accuracy", 1000, 1e7)
++            .value_or(50000));
++    context = owned.get();
++    web_contents->SetUserData(&kContextKey, std::move(owned));
++  }
++  return context;
++}
++
+ AwContentBrowserClient::~AwContentBrowserClient() = default;
+ 
+ void AwContentBrowserClient::OnNetworkServiceCreated(
+diff --git a/android_webview/browser/aw_content_browser_client.h b/android_webview/browser/aw_content_browser_client.h
+index dfd76939e2cc4838f33d0bb4a30fd95dd2584567..a2b3fb16d2c8b5b583c7664d784f6d63a2eed4be 100644
+--- a/android_webview/browser/aw_content_browser_client.h
++++ b/android_webview/browser/aw_content_browser_client.h
+@@ -69,6 +69,8 @@ class AwContentBrowserClient : public content::ContentBrowserClient {
+   void InitBrowserContextStore();
+ 
+   // content::ContentBrowserClient:
++  device::mojom::GeolocationContext* GetGeolocationContextOverride(
++      content::WebContents* web_contents) override;
+   void OnNetworkServiceCreated(
+       network::mojom::NetworkService* network_service) override;
+   void ConfigureNetworkContextParams(
+diff --git a/android_webview/browser/aw_ip_geolocation_context.cc b/android_webview/browser/aw_ip_geolocation_context.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..acda3dcfc1d6019b8a48619489b9ce98cb700e8a
+--- /dev/null
++++ b/android_webview/browser/aw_ip_geolocation_context.cc
+@@ -0,0 +1,206 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "android_webview/browser/aw_ip_geolocation_context.h"
++
++#include <algorithm>
++#include <cmath>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/logging.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/values.h"
++#include "net/base/load_flags.h"
++#include "net/base/net_errors.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "services/network/public/cpp/simple_url_loader.h"
++#include "services/network/public/mojom/fetch_api.mojom.h"
++
++namespace android_webview {
++namespace {
++constexpr size_t kMaxResponseBytes = 65536;
++
++std::optional<double> Coordinate(const base::DictValue& dict,
++                                 std::string_view key,
++                                 double limit) {
++  const auto* value = dict.Find(key);
++  double number;
++  if (!value) {
++    return std::nullopt;
++  }
++  if (value->is_int() || value->is_double()) {
++    number = value->GetDouble();
++  } else if (!value->is_string() ||
++             !base::StringToDouble(value->GetString(), &number)) {
++    return std::nullopt;
++  }
++  if (!std::isfinite(number) || std::abs(number) > limit) {
++    return std::nullopt;
++  }
++  return number;
++}
++
++device::mojom::GeopositionResultPtr Unavailable() {
++  return device::mojom::GeopositionResult::NewError(
++      device::mojom::GeopositionError::New(
++          device::mojom::GeopositionErrorCode::kPositionUnavailable,
++          "IP-based location is unavailable", ""));
++}
++}  // namespace
++
++AwIpGeolocationContext::AwIpGeolocationContext(
++    scoped_refptr<network::SharedURLLoaderFactory> factory,
++    mojo::Remote<device::mojom::GeolocationContext> device_context,
++    GURL endpoint,
++    double accuracy)
++    : factory_(std::move(factory)),
++      device_context_(std::move(device_context)),
++      endpoint_(std::move(endpoint)),
++      accuracy_(accuracy) {
++  CHECK(factory_);
++  CHECK(endpoint_.is_valid() && endpoint_.SchemeIs("https"));
++  CHECK(std::isfinite(accuracy_) && accuracy_ >= 1000 && accuracy_ <= 1e7);
++}
++
++AwIpGeolocationContext::~AwIpGeolocationContext() = default;
++
++void AwIpGeolocationContext::BindGeolocation(
++    mojo::PendingReceiver<device::mojom::Geolocation> receiver,
++    const url::Origin& requesting_origin,
++    device::mojom::GeolocationClientId client_id,
++    bool has_precise_permission) {
++  // Keep a successful location stable for this WebContents. Retry a failed
++  // lookup only on a new request, with a cooldown to prevent request storms.
++  if (!loader_ && result_ &&
++      (explicit_override_ || result_->is_position() ||
++       base::TimeTicks::Now() - last_attempt_ < base::Seconds(30))) {
++    device_context_->BindGeolocation(std::move(receiver), requesting_origin,
++                                     client_id, has_precise_permission);
++    return;
++  }
++  pending_bindings_.push_back({std::move(receiver), requesting_origin,
++                               client_id, has_precise_permission});
++  if (!loader_) {
++    StartLookup();
++  }
++}
++
++void AwIpGeolocationContext::OnPermissionUpdated(
++    const url::Origin& origin,
++    device::mojom::GeolocationPermissionLevel permission_level) {
++  if (permission_level == device::mojom::GeolocationPermissionLevel::kDenied) {
++    std::erase_if(pending_bindings_, [&](const PendingBinding& item) {
++      return item.origin == origin;
++    });
++  } else {
++    for (auto& item : pending_bindings_) {
++      if (item.origin == origin) {
++        item.precise = permission_level ==
++                       device::mojom::GeolocationPermissionLevel::kPrecise;
++      }
++    }
++  }
++  device_context_->OnPermissionUpdated(origin, permission_level);
++}
++
++void AwIpGeolocationContext::SetOverride(
++    device::mojom::GeopositionResultPtr result) {
++  explicit_override_ = true;
++  // Preserve debugger overrides; clearing them restores IP mode, never GPS.
++  weak_factory_.InvalidateWeakPtrs();
++  loader_.reset();
++  ApplyResult(std::move(result));
++}
++
++void AwIpGeolocationContext::ClearOverride() {
++  explicit_override_ = false;
++  weak_factory_.InvalidateWeakPtrs();
++  loader_.reset();
++  result_.reset();
++  StartLookup();
++}
++
++void AwIpGeolocationContext::StartLookup() {
++  last_attempt_ = base::TimeTicks::Now();
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = endpoint_;
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;
++  request->redirect_mode = network::mojom::RedirectMode::kError;
++  request->load_flags = net::LOAD_DISABLE_CACHE;
++  request->do_not_prompt_for_login = true;
++  constexpr auto annotation =
++      net::DefineNetworkTrafficAnnotation("webview_ip_geolocation", R"(
++        semantics {
++          sender: "WebView IP geolocation"
++          description:
++            "When explicitly configured, obtains approximate coordinates for "
++            "the WebView's network exit IP using that WebView's network context."
++          trigger: "A permitted page requests geolocation in configured IP mode."
++          data: "An HTTPS GET. No cookies, device GPS or Wi-Fi scan data."
++          destination: OTHER
++          destination_other: "The configured IP lookup endpoint; default ipwho.is."
++        }
++        policy {
++          cookies_allowed: NO
++          setting: "Disabled by default; enabled by geolocation.mode=ip in the startup JSON."
++          policy_exception_justification: "A custom WebView build startup setting."
++        })");
++  loader_ = network::SimpleURLLoader::Create(std::move(request), annotation);
++  loader_->SetTimeoutDuration(base::Seconds(10));
++  loader_->DownloadToString(
++      factory_.get(),
++      base::BindOnce(&AwIpGeolocationContext::OnLookupComplete,
++                     weak_factory_.GetWeakPtr()),
++      kMaxResponseBytes);
++}
++
++void AwIpGeolocationContext::OnLookupComplete(std::optional<std::string> body) {
++  auto result = Unavailable();
++  if (body && loader_->NetError() == net::OK) {
++    auto dict = base::JSONReader::ReadDict(*body, base::JSON_PARSE_RFC);
++    if (dict &&
++        (!dict->Find("success") || dict->FindBool("success").value_or(false))) {
++      const auto latitude = Coordinate(*dict, "latitude", 90);
++      const auto longitude = Coordinate(*dict, "longitude", 180);
++      if (latitude && longitude) {
++        auto position = device::mojom::Geoposition::New();
++        position->latitude = *latitude;
++        position->longitude = *longitude;
++        position->accuracy = accuracy_;
++        position->timestamp = base::Time::Now();
++        position->is_precise = false;
++        result =
++            device::mojom::GeopositionResult::NewPosition(std::move(position));
++      }
++    }
++  }
++  // Never log endpoint URLs, API keys, IP addresses or coordinates.
++  if (result->is_error()) {
++    LOG(WARNING)
++        << "IP geolocation lookup failed; system location remains disabled";
++  } else {
++    LOG(INFO) << "IP geolocation is ready";
++  }
++  loader_.reset();
++  ApplyResult(std::move(result));
++}
++
++void AwIpGeolocationContext::ApplyResult(
++    device::mojom::GeopositionResultPtr result) {
++  result_ = std::move(result);
++  // This message is queued before any bindings, including on lookup failure.
++  device_context_->SetOverride(result_->Clone());
++  for (auto& item : pending_bindings_) {
++    device_context_->BindGeolocation(std::move(item.receiver), item.origin,
++                                     item.client_id, item.precise);
++  }
++  pending_bindings_.clear();
++}
++
++}  // namespace android_webview
+diff --git a/android_webview/browser/aw_ip_geolocation_context.h b/android_webview/browser/aw_ip_geolocation_context.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e51d5ccdb929b13725e6044f07f99273db310a56
+--- /dev/null
++++ b/android_webview/browser/aw_ip_geolocation_context.h
+@@ -0,0 +1,81 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef ANDROID_WEBVIEW_BROWSER_AW_IP_GEOLOCATION_CONTEXT_H_
++#define ANDROID_WEBVIEW_BROWSER_AW_IP_GEOLOCATION_CONTEXT_H_
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/supports_user_data.h"
++#include "base/time/time.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "services/device/public/mojom/geolocation_context.mojom.h"
++#include "services/device/public/mojom/geoposition.mojom.h"
++#include "url/gurl.h"
++#include "url/origin.h"
++
++namespace network {
++class SharedURLLoaderFactory;
++class SimpleURLLoader;
++}  // namespace network
++
++namespace android_webview {
++
++// An IP-only context owned by one WebContents. The caller supplies that
++// WebContents' network factory, so IP lookup uses its configured proxy.
++// Bindings wait for an override before reaching the device context: neither
++// slow lookup nor lookup failure can start the system location provider.
++class AwIpGeolocationContext final : public base::SupportsUserData::Data,
++                                     public device::mojom::GeolocationContext {
++ public:
++  AwIpGeolocationContext(
++      scoped_refptr<network::SharedURLLoaderFactory> factory,
++      mojo::Remote<device::mojom::GeolocationContext> device_context,
++      GURL endpoint,
++      double accuracy);
++  ~AwIpGeolocationContext() override;
++
++  void BindGeolocation(
++      mojo::PendingReceiver<device::mojom::Geolocation> receiver,
++      const url::Origin& requesting_origin,
++      device::mojom::GeolocationClientId client_id,
++      bool has_precise_permission) override;
++  void OnPermissionUpdated(
++      const url::Origin& origin,
++      device::mojom::GeolocationPermissionLevel permission_level) override;
++  void SetOverride(device::mojom::GeopositionResultPtr result) override;
++  void ClearOverride() override;
++
++ private:
++  struct PendingBinding {
++    mojo::PendingReceiver<device::mojom::Geolocation> receiver;
++    url::Origin origin;
++    device::mojom::GeolocationClientId client_id;
++    bool precise;
++  };
++
++  void StartLookup();
++  void OnLookupComplete(std::optional<std::string> body);
++  void ApplyResult(device::mojom::GeopositionResultPtr result);
++
++  const scoped_refptr<network::SharedURLLoaderFactory> factory_;
++  mojo::Remote<device::mojom::GeolocationContext> device_context_;
++  const GURL endpoint_;
++  const double accuracy_;
++  std::vector<PendingBinding> pending_bindings_;
++  device::mojom::GeopositionResultPtr result_;
++  base::TimeTicks last_attempt_;
++  bool explicit_override_ = false;
++  std::unique_ptr<network::SimpleURLLoader> loader_;
++  base::WeakPtrFactory<AwIpGeolocationContext> weak_factory_{this};
++};
++
++}  // namespace android_webview
++
++#endif  // ANDROID_WEBVIEW_BROWSER_AW_IP_GEOLOCATION_CONTEXT_H_
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+index 367bb4509cd995a8c8ffa80840b4b60b8d1bda5c..57a367daef9ac497c5501c2c9125ccb2aaccc4ac 100644
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -6653,6 +6653,10 @@ void WebContentsImpl::UnrecoverableAccessibilityError() {
+ 
+ device::mojom::GeolocationContext* WebContentsImpl::GetGeolocationContext() {
+   OPTIONAL_TRACE_EVENT0("content", "WebContentsImpl::GetGeolocationContext");
++  if (auto* context =
++          GetContentClient()->browser()->GetGeolocationContextOverride(this)) {
++    return context;
++  }
+   if (delegate_) {
+     auto* installed_webapp_context =
+         delegate_->GetInstalledWebappGeolocationContext();
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index 6a07f32cb64a90a09b44cf9f7c2479f257eba198..2c87af6e665b4b944151ac5810f79ad0fd2a8334 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -778,6 +778,11 @@ ContentBrowserClient::GetSystemNetworkContext() {
+   return nullptr;
+ }
+ 
++device::mojom::GeolocationContext*
++ContentBrowserClient::GetGeolocationContextOverride(WebContents* web_contents) {
++  return nullptr;
++}
++
+ std::string ContentBrowserClient::GetGeolocationApiKey() {
+   return std::string();
+ }
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 42a04c54b65ddcf0905c7d527de950303bcf8ab7..c8574421867195d9bc50a7925c4a642949c09d00 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -150,6 +150,9 @@ class URLLoaderThrottle;
+ namespace device {
+ class GeolocationSystemPermissionManager;
+ class LocationProvider;
++namespace mojom {
++class GeolocationContext;
++}
+ }  // namespace device
+ 
+ namespace gfx {
+@@ -1171,6 +1174,12 @@ class CONTENT_EXPORT ContentBrowserClient {
+   // * Default implementation returns empty string, meaning send no API key.
+   virtual std::string GetGeolocationApiKey();
+ 
++  // Optional embedder-owned geolocation context for one WebContents. Called on
++  // the UI thread; returning nullptr keeps the standard device context. This
++  // does not change geolocation permission checks.
++  virtual device::mojom::GeolocationContext* GetGeolocationContextOverride(
++      WebContents* web_contents);
++
+   // Returns the global BrowserProcessPlatformParts'
+   // GeolocationSystemPermissionManager on supported operating systems and
+   // returns nullptr otherwise. For tests this should return a
+diff --git a/third_party/blink/common/webview/fingerprint_config.cc b/third_party/blink/common/webview/fingerprint_config.cc
+index 7c2abd5758446e300b9ffe10c39454c215273d84..c24ce428fde86c8e2c70e6ba198478b575f871b2 100644
+--- a/third_party/blink/common/webview/fingerprint_config.cc
++++ b/third_party/blink/common/webview/fingerprint_config.cc
+@@ -29,7 +29,8 @@ enum class Kind {
+   kNumber,
+   kBrands,
+   kProxy,
+-  kIPv4
++  kIPv4,
++  kHttpsUrl
+ };
+ struct Field {
+   std::string_view key;
+@@ -41,6 +42,9 @@ constexpr Field kFields[] = {
+     {"navigator.useragent", Kind::kHeader},
+     {"config.x_requested_with", Kind::kHeader},
+     {"network.proxy", Kind::kProxy},
++    {"geolocation.mode", Kind::kAscii},
++    {"geolocation.endpoint", Kind::kHttpsUrl},
++    {"geolocation.accuracy", Kind::kNumber, 1000, 1e7},
+     {"navigator.hardwareConcurrency", Kind::kInt, 1, 1024},
+     {"navigator.deviceMemory", Kind::kNumber, 0.125, 1024},
+     {"navigator.maxTouchPoints", Kind::kInt, 0, 100},
+@@ -198,6 +202,19 @@ bool Convert(const Field& field,
+   if (field.key == "navigator.useragent" && output.empty()) {
+     return false;
+   }
++  if (field.key == "geolocation.mode" && output != "native" && output != "ip") {
++    return false;
++  }
++  if (field.kind == Kind::kHttpsUrl) {
++    const GURL url(output);
++    if (!url.is_valid() || !url.SchemeIs("https") || url.host().empty() ||
++        url.has_username() || url.has_password() || url.has_ref() ||
++        !std::all_of(output.begin(), output.end(),
++                     [](unsigned char c) { return c > 32 && c < 127; }) ||
++        (url.has_port() && url.IntPort() <= 0)) {
++      return false;
++    }
++  }
+   if (field.kind == Kind::kIPv4 && !ValidIPv4(output)) {
+     return false;
+   }
+diff --git a/webview_custom/BUILD.gn b/webview_custom/BUILD.gn
+index c669b6c92cc5171055b8d4d26d8bed025bc553d4..1110c36e276091c2c87ff4d31debda94a8f0fcc3 100644
+--- a/webview_custom/BUILD.gn
++++ b/webview_custom/BUILD.gn
+@@ -15,3 +15,34 @@ executable("fingerprint_config_test") {
+     "//url",
+   ]
+ }
++
++executable("ip_geolocation_test") {
++  testonly = true
++  sources = [
++    "../android_webview/browser/aw_ip_geolocation_context.cc",
++    "../services/network/test/test_url_loader_factory.cc",
++    "../services/network/test/test_url_loader_factory.h",
++    "../services/network/test/test_utils.cc",
++    "../services/network/test/test_utils.h",
++    "tests/ip_geolocation_test.cc",
++  ]
++  deps = [
++    "//base",
++    "//base/test:test_support",
++    "//mojo/core/embedder",
++    "//mojo/public/cpp/bindings",
++    "//net",
++    "//services/device/public/mojom",
++    "//services/network/public/cpp",
++    "//testing/gtest",
++    "//url",
++  ]
++}
++
++group("host_tests") {
++  testonly = true
++  deps = [
++    ":fingerprint_config_test",
++    ":ip_geolocation_test",
++  ]
++}
+diff --git a/webview_custom/PROPERTY_PATCHES.md b/webview_custom/PROPERTY_PATCHES.md
+index 49da5df8ac7f7fc9617ae4ebf135011afcc22c22..9012ebbe3495276db5c277aa28a437f736c72806 100644
+--- a/webview_custom/PROPERTY_PATCHES.md
++++ b/webview_custom/PROPERTY_PATCHES.md
+@@ -10,6 +10,9 @@
+ | --- | --- |
+ | config.x_requested_with | 未设置：原生包名策略；非空合法字符串：替换；空字符串：删除 |
+ | network.proxy | 进程启动代理策略，支持单个 `http://`、`https://` 或 `socks5://` 端点；默认不启用。入口拒绝非法 URI，修改需重启宿主进程，详见 [NETWORK_POLICY.md](NETWORK_POLICY.md) |
++| geolocation.mode | native / ip；默认原生，ip 按当前 WebView 网络出口查询近似经纬度，失败返回不可用 |
++| geolocation.endpoint | HTTPS IP 查询地址，默认 https://ipwho.is/；顶层 latitude / longitude 响应格式，详见 UNIFIED_CONFIG.md |
++| geolocation.accuracy | 报告半径，单位米，1000..10000000，默认 50000；不保证数据库精度 |
+ | navigator.useragent | 完整 HTTP / JS UA 字符串，最多 4096 字节；拒绝非法控制字符。不再分段 |
+ | navigator.userAgentMeta.brands / fullVersionList | 可省略并自动生成；手动覆盖使用 `[{"brand":"Chromium","version":"158"}]` 数组，完整版本列表单独配置 |
+ | navigator.userAgentMeta.mobile / wow64 | JSON 布尔值 true/false |
+diff --git a/webview_custom/UNIFIED_CONFIG.md b/webview_custom/UNIFIED_CONFIG.md
+index 9eab41645772acac6ffdffcf11191158b26851e3..f29cc8d48be94cc9827419af7c5e0dea77259c34 100644
+--- a/webview_custom/UNIFIED_CONFIG.md
++++ b/webview_custom/UNIFIED_CONFIG.md
+@@ -59,6 +59,32 @@ WebView 在宿主进程初始化时自动读取固定路径：
+ 
+ 这会关闭字段覆盖、定制代理和 Canvas 扰动；早期 Window/document/navigator 的 IDL 定制仍保留。
+ 
++
++## 按出口 IP 分配地理位置
++
++在 settings 中启用：
++
++```json
++{"version":1,"enabled":true,"settings":{"geolocation.mode":"ip"}}
++```
++
++`geolocation.mode` 支持 `native` / `ip`，省略时保留原生定位。只有 enabled=true 且 mode=ip 才进行 IP 查询。支持与 `network.proxy` 同时配置，例如：
++
++```json
++{"version":1,"enabled":true,"settings":{"network.proxy":"socks5://192.0.2.1:1080","geolocation.mode":"ip"}}
++```
++
++- 页面通过原有安全上下文、Permissions Policy 和宿主定位许可检查后，首次定位请求触发查询。查询使用该 WebContents 所在 StoragePartition 的网络工厂，因此使用相同网络上下文及其代理设置。
++- 默认服务为 `https://ipwho.is/`。可通过 `geolocation.endpoint` 指定自有 HTTPS 服务；响应需包含顶层 latitude / longitude 数值或合法数字字符串。success 若存在必须为 true。经纬度分别限制在 [-90,90] / [-180,180]。
++- 服务会看到本次查询的出口 IP；不发送 Cookie、GPS 或 Wi-Fi 扫描数据，不跟随重定向。请求超时 10 秒，响应最多 65536 字节，不记录 URL / API Key / IP / 坐标日志。
++- `geolocation.accuracy` 为报告半径，单位米，范围 1000..10000000，默认 50000。IP 数据库只能提供近似位置，该数值不保证数据库具备对应真实精度。
++- 查询完成前，定位绑定进入等待队列。成功或失败时均先设置原生 GeolocationContext 的 override，再绑定请求；失败返回 POSITION_UNAVAILABLE，不启用系统 GPS 作为后备。
++- 同一 WebContents 的成功结果固定保存到该 WebContents 销毁。查询失败后，新定位请求可在 30 秒冷却结束后重试；同时到来的请求合并为一次查询。修改启动配置仍需完整重启宿主进程。
++- 原生 getCurrentPosition / watchPosition 接口及权限撤销流程保留；DevTools 定位 override 清除后恢复 IP 模式。
++- 本次只接入地理位置，未同步修改语言或时区，亦不提供持续跟踪移动位置。
++
++参考 [VirtualBrowser worker](https://github.com/Virtual-Browser/VirtualBrowser/blob/0c6e8ab41b15fedc7a125b7c4314faa974dd87a9/worker/src/App.vue#L102) 的“出口查询结果 → location”流程独立实现。该仓库公开前端调用 setIpGeo，未公开其 Chromium 内核处理源码，本实现未复制其内核代码。
++
+ ## 加载时机和失败处理
+ 
+ - 宿主浏览器进程加载 WebView 原生库并完成 JNI 初始化后立即读取一次，再冻结配置；早于后续浏览器启动和网络上下文创建。renderer 不访问外部存储，只接收浏览器传递的快照。
+@@ -82,12 +108,15 @@ WebView 内核运行在宿主 App 的 UID 下，读取此路径使用宿主的
+ 实际 Chromium 配置 / 文件集成测试：
+ 
+ ```sh
+-gn gen out/Fingerprint-host --root-target=//webview_custom:fingerprint_config_test \
++gn gen out/Fingerprint-host --root-target=//webview_custom:host_tests \
+   --args='is_debug=false is_component_build=false symbol_level=0 use_remoteexec=false target_os="linux" target_cpu="x64"'
+-autoninja -C out/Fingerprint-host -j 16 fingerprint_config_test
++autoninja -C out/Fingerprint-host -j 16 fingerprint_config_test ip_geolocation_test
+ out/Fingerprint-host/fingerprint_config_test
++out/Fingerprint-host/ip_geolocation_test
+ ```
+ 
+ 覆盖文件缺失、正常读取、空文件、大小上限、目录、FIFO、权限拒绝、非法 JSON，以及配置原子拒绝、并发快照、冻结和新进程导入。`test_auto_brands.py` 执行实际 UA 版本解析和元数据策略方法，类型与上游品牌生成函数边界使用适配器；原生品牌函数与 Java/JNI 自动入口由 APK 编译 / 链接检查。
+ 
+ 既有配置 / 请求头、9 项方法回归、网络身份和 81 种 Canvas 组合测试继续保留。宿主实际启动读取、Android 存储权限、页面 / Worker 结果及代理出口仍需真机验证。`smoke.html` 默认按 fillRect 噪声关闭检查；显式开启时加载 `smoke.html?noise=on`。
++
++IP 定位主机测试使用实际 SimpleURLLoader、TestURLLoaderFactory 和 Mojo；替换下游设备上下文，覆盖请求合并、override 先于绑定、数据校验、响应上限、失败冷却、网络超时、权限撤销 / 降级、清除 override 恢复 IP 及销毁。Android 真机代理出口、权限提示、GPS 行为和页面结果仍需设备验证。
+diff --git a/webview_custom/fingerprint.ip.example.json b/webview_custom/fingerprint.ip.example.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..c43e8509273c45a2f7ceb25753bd2b79f3464e6d
+--- /dev/null
++++ b/webview_custom/fingerprint.ip.example.json
+@@ -0,0 +1,10 @@
++{
++  "version": 1,
++  "enabled": true,
++  "settings": {
++    "geolocation.mode": "ip",
++    "geolocation.accuracy": 50000,
++    "navigator.userAgentMeta.mobile": true,
++    "navigator.userAgentMeta.platform": "Android"
++  }
++}
+diff --git a/webview_custom/tests/DEPS b/webview_custom/tests/DEPS
+new file mode 100644
+index 0000000000000000000000000000000000000000..07229cc84de68f8d38fa4af02352f953f0661408
+--- /dev/null
++++ b/webview_custom/tests/DEPS
+@@ -0,0 +1,12 @@
++# Dependencies used by the native configuration and IP geolocation tests.
++include_rules = [
++  "+android_webview/browser/aw_fingerprint_config_file.h",
++  "+android_webview/browser/aw_ip_geolocation_context.h",
++  "+mojo/core/embedder",
++  "+mojo/public/cpp",
++  "+net",
++  "+services/device/public/mojom",
++  "+services/network/public",
++  "+services/network/test/test_url_loader_factory.h",
++  "+third_party/blink/public/common/webview",
++]
+diff --git a/webview_custom/tests/fingerprint_config_test.cc b/webview_custom/tests/fingerprint_config_test.cc
+index fcf0aceb52d58e72a9e86e4269af0937544bdd82..b31ef6e15ed22699cabc0aa8db21a1a431153f75 100644
+--- a/webview_custom/tests/fingerprint_config_test.cc
++++ b/webview_custom/tests/fingerprint_config_test.cc
+@@ -40,6 +40,9 @@ int main(int argc, char** argv) {
+     "navigator.hardwareConcurrency":8,"navigator.deviceMemory":8,
+     "config.x_requested_with":"","canvas.fillRectNoise":false,
+     "network.proxy":"socks5://[2001:db8::1]:1080",
++    "geolocation.mode":"ip",
++    "geolocation.endpoint":"https://example.test/ip?key=example",
++    "geolocation.accuracy":50000,
+     "navigator.userAgentMeta.brands":[{"brand":"Chromium","version":"158"}]
+   }})";
+   base::ScopedTempDir temporary;
+@@ -110,6 +113,11 @@ int main(int argc, char** argv) {
+       R"({"version":1,"enabled":true,"settings":{"network.proxy":"http://proxy:80/"}})",
+       R"({"version":1,"enabled":true,"settings":{"webrtc.private_ip":"01.2.3.4"}})",
+       R"({"version":1,"enabled":true,"settings":{"navigator.connection.type":"bad"}})",
++      R"({"version":1,"enabled":true,"settings":{"geolocation.mode":"GPS"}})",
++      R"({"version":1,"enabled":true,"settings":{"geolocation.endpoint":"http://example.test"}})",
++      R"({"version":1,"enabled":true,"settings":{"geolocation.endpoint":"https://u:p@example.test"}})",
++      R"({"version":1,"enabled":true,"settings":{"geolocation.endpoint":"https://example.test/#a"}})",
++      R"({"version":1,"enabled":true,"settings":{"geolocation.accuracy":1}})",
+       std::string(32769, ' '),
+   };
+   for (const auto& json : invalid) {
+diff --git a/webview_custom/tests/ip_geolocation_test.cc b/webview_custom/tests/ip_geolocation_test.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..1aed377ecbd1d1c7a2bf80b70f1b7b6981b79592
+--- /dev/null
++++ b/webview_custom/tests/ip_geolocation_test.cc
+@@ -0,0 +1,213 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <iostream>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "android_webview/browser/aw_ip_geolocation_context.h"
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/run_loop.h"
++#include "base/task/single_thread_task_executor.h"
++#include "mojo/core/embedder/embedder.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "net/base/load_flags.h"
++#include "net/base/net_errors.h"
++#include "services/device/public/mojom/geolocation.mojom.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/url_loader_completion_status.h"
++#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++#include "services/network/test/test_url_loader_factory.h"
++#include "url/origin.h"
++
++namespace {
++constexpr char kEndpoint[] = "https://example.test/ip";
++using android_webview::AwIpGeolocationContext;
++
++// Exercise the production network/queue logic with real Chromium URL loaders
++// and Mojo. Only the downstream device context is replaced: Android GPS and
++// permission UI are covered by the APK build and require device testing.
++class DeviceContext final : public device::mojom::GeolocationContext {
++ public:
++  void BindGeolocation(
++      mojo::PendingReceiver<device::mojom::Geolocation> receiver,
++      const url::Origin& origin,
++      device::mojom::GeolocationClientId client_id,
++      bool precise) override {
++    CHECK(result);  // Override must arrive before every native binding.
++    receivers.push_back(std::move(receiver));
++    last_precise = precise;
++  }
++  void OnPermissionUpdated(
++      const url::Origin& origin,
++      device::mojom::GeolocationPermissionLevel permission_level) override {}
++  void SetOverride(device::mojom::GeopositionResultPtr value) override {
++    result = std::move(value);
++  }
++  void ClearOverride() override { ++clears; }
++
++  mojo::Receiver<device::mojom::GeolocationContext> context_receiver{this};
++  device::mojom::GeopositionResultPtr result;
++  std::vector<mojo::PendingReceiver<device::mojom::Geolocation>> receivers;
++  bool last_precise = false;
++  int clears = 0;
++};
++
++struct Fixture {
++  Fixture() {
++    mojo::Remote<device::mojom::GeolocationContext> remote;
++    device.context_receiver.Bind(remote.BindNewPipeAndPassReceiver());
++    context = std::make_unique<AwIpGeolocationContext>(
++        factory.GetSafeWeakWrapper(), std::move(remote), GURL(kEndpoint),
++        50000);
++  }
++
++  mojo::Remote<device::mojom::Geolocation> Bind() {
++    mojo::Remote<device::mojom::Geolocation> remote;
++    context->BindGeolocation(
++        remote.BindNewPipeAndPassReceiver(), origin,
++        device::mojom::GeolocationClientId::kGeolocationServiceImpl, true);
++    return remote;
++  }
++
++  void Respond(std::string_view json) {
++    CHECK(factory.SimulateResponseForPendingRequest(kEndpoint, json));
++    base::RunLoop().RunUntilIdle();
++  }
++
++  network::TestURLLoaderFactory factory;
++  DeviceContext device;
++  std::unique_ptr<AwIpGeolocationContext> context;
++  url::Origin origin = url::Origin::Create(GURL("https://page.test"));
++};
++}  // namespace
++
++int main() {
++  base::SingleThreadTaskExecutor executor;
++  mojo::core::Init();
++  {
++    Fixture f;
++    auto a = f.Bind();
++    auto b = f.Bind();
++    CHECK_EQ(f.factory.NumPending(), 1);
++    CHECK(f.device.receivers.empty());
++    const auto& request = f.factory.GetPendingRequest(0)->request;
++    CHECK_EQ(request.credentials_mode, network::mojom::CredentialsMode::kOmit);
++    CHECK_EQ(request.redirect_mode, network::mojom::RedirectMode::kError);
++    CHECK(request.load_flags & net::LOAD_DISABLE_CACHE);
++    CHECK(request.do_not_prompt_for_login);
++    f.Respond(R"({"success":true,"latitude":35.5,"longitude":139.5})");
++    CHECK(f.device.result->is_position());
++    CHECK_EQ(f.device.result->get_position()->latitude, 35.5);
++    CHECK_EQ(f.device.result->get_position()->longitude, 139.5);
++    CHECK_EQ(f.device.result->get_position()->accuracy, 50000);
++    CHECK(!f.device.result->get_position()->timestamp.is_null());
++    CHECK(!f.device.result->get_position()->is_precise);
++    CHECK_EQ(f.device.receivers.size(), 2u);
++    auto c = f.Bind();
++    base::RunLoop().RunUntilIdle();
++    CHECK_EQ(f.device.receivers.size(), 3u);
++    CHECK_EQ(f.factory.NumPending(), 0);
++  }
++  {
++    Fixture f;
++    auto a = f.Bind();
++    f.Respond(R"({"latitude":"-90","longitude":"180"})");
++    CHECK(f.device.result->is_position());
++  }
++  const std::vector<std::string> invalid = {
++      "not JSON",
++      "[]",
++      "{}",
++      R"({"latitude":91,"longitude":0})",
++      R"({"latitude":0,"longitude":-181})",
++      R"({"latitude":false,"longitude":0})",
++      R"({"latitude":"NaN","longitude":0})",
++      R"({"latitude":"1oops","longitude":0})",
++      R"({"success":false,"latitude":1,"longitude":2})",
++      R"({"success":"false","latitude":1,"longitude":2})",
++      std::string(65537, 'x')};
++  for (const auto& body : invalid) {
++    Fixture f;
++    auto a = f.Bind();
++    f.Respond(body);
++    CHECK(f.device.result->is_error());
++    CHECK_EQ(f.device.result->get_error()->error_code,
++             device::mojom::GeopositionErrorCode::kPositionUnavailable);
++    CHECK_EQ(f.device.receivers.size(), 1u);
++    auto b = f.Bind();
++    base::RunLoop().RunUntilIdle();
++    CHECK_EQ(f.factory.NumPending(), 0);
++    CHECK_EQ(f.device.receivers.size(), 2u);
++    CHECK_EQ(f.device.clears, 0);
++  }
++  {
++    Fixture f;
++    auto a = f.Bind();
++    CHECK(f.factory.IsPending(kEndpoint));
++    CHECK(f.factory.SimulateResponseForPendingRequest(
++        GURL(kEndpoint), network::URLLoaderCompletionStatus(net::ERR_TIMED_OUT),
++        network::mojom::URLResponseHead::New(), ""));
++    base::RunLoop().RunUntilIdle();
++    CHECK(f.device.result->is_error());
++    CHECK_EQ(f.device.clears, 0);
++  }
++  {
++    Fixture f;
++    auto a = f.Bind();
++    f.context->OnPermissionUpdated(
++        f.origin, device::mojom::GeolocationPermissionLevel::kDenied);
++    f.Respond(R"({"latitude":1,"longitude":2})");
++    CHECK(f.device.receivers.empty());
++  }
++  {
++    Fixture f;
++    auto a = f.Bind();
++    f.context->OnPermissionUpdated(
++        f.origin, device::mojom::GeolocationPermissionLevel::kApproximate);
++    f.Respond(R"({"latitude":1,"longitude":2})");
++    CHECK(!f.device.last_precise);
++    f.context->ClearOverride();
++    f.Respond(R"({"latitude":3,"longitude":4})");
++    CHECK_EQ(f.device.result->get_position()->latitude, 3);
++    CHECK_EQ(f.device.clears, 0);
++  }
++  {
++    Fixture f;
++    auto a = f.Bind();
++    CHECK(f.factory.SimulateResponseForPendingRequest(
++        kEndpoint, R"({"latitude":1,"longitude":2})",
++        net::HTTP_SERVICE_UNAVAILABLE));
++    base::RunLoop().RunUntilIdle();
++    CHECK(f.device.result->is_error());
++  }
++  {
++    Fixture f;
++    f.context->SetOverride(device::mojom::GeopositionResult::NewError(
++        device::mojom::GeopositionError::New(
++            device::mojom::GeopositionErrorCode::kPositionUnavailable,
++            "Debugger test", "")));
++    auto a = f.Bind();
++    base::RunLoop().RunUntilIdle();
++    CHECK(f.device.result->is_error());
++    CHECK(!f.factory.IsPending(kEndpoint));
++    f.context->ClearOverride();
++    f.Respond(R"({"latitude":1,"longitude":2})");
++    CHECK(f.device.result->is_position());
++    CHECK_EQ(f.device.clears, 0);
++  }
++  {
++    Fixture f;
++    auto a = f.Bind();
++    CHECK(f.factory.IsPending(kEndpoint));
++    f.context.reset();
++    base::RunLoop().RunUntilIdle();
++    CHECK(f.device.receivers.empty());
++  }
++  std::cout << "PASS IP lookup, queue/order, cache, validation, size, timeout, "
++               "permission updates, IP restore and destruction\n";
++}

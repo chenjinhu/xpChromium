@@ -6,8 +6,8 @@
 | --- | --- |
 | Chromium 版本 | `158.0.8109.0` |
 | 官方基线 | `51b3c21991199bc9531e7d296056dd9351554c0c` |
-| 自定义源码提交 | `ac5ae14b50b7a5e8c281b56664d4eef416ec528a` |
-| 自定义提交数 | 12 |
+| 自定义源码提交 | `9f4b898a58ed183a1fabb060a39b4eeac8eefae4` |
+| 自定义提交数 | 13 |
 | 构建目标 | `system_webview_64_apk` |
 | APK 包名 | `com.android.webview` |
 
@@ -23,6 +23,8 @@
 - [WebView 编译参数](config/webview-arm64.gn)
 
 WebView 初始化时自动读取 `/sdcard/xpChromium/fingerprint.json`，不需要宿主主动调用方法。已经取消系统属性输入和旧的 Java configure API。文件格式、存储权限和自动 brands 规则见 [UNIFIED_CONFIG.md](docs/UNIFIED_CONFIG.md)，示例见 [examples/fingerprint.json](examples/fingerprint.json)。brands / fullVersionList 可省略，自动跟随自定义 UA 的合法 Chrome/版本或实际内核版本；默认关闭字段覆盖、代理和 Canvas 扰动。配置启动时冻结，修改文件后需完整重启宿主进程。
+
+通过 `geolocation.mode=ip` 可在定位获准后按当前 WebView 的网络出口查询近似位置，失败返回不可用；默认使用原生定位。配置示例见 [fingerprint-ip.json](examples/fingerprint-ip.json)。语言和时区尚未与出口联动。
 
 ## 在现有服务器继续开发
 

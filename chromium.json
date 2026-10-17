@@ -3,7 +3,7 @@
   "chromium_version": "158.0.8109.0",
   "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
   "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
-  "source_head": "ac5ae14b50b7a5e8c281b56664d4eef416ec528a",
+  "source_head": "9f4b898a58ed183a1fabb060a39b4eeac8eefae4",
   "target": {
     "os": "android",
     "cpu": "arm64",
@@ -82,7 +82,13 @@
       "source_commit": "ac5ae14b50b7a5e8c281b56664d4eef416ec528a",
       "subject": "Load fingerprint JSON automatically at startup and generate default UA brands",
       "sha256": "22d561d2784cf7b6742f26dfd667f3d660ce2fb99c8d0504a712d9085a9531d9"
+    },
+    {
+      "file": "patches/0013-9f4b898a58.patch",
+      "source_commit": "9f4b898a58ed183a1fabb060a39b4eeac8eefae4",
+      "subject": "Resolve WebView geolocation from its network exit IP",
+      "sha256": "2e6b0cd7dd549df94aa075b8dd389989dfa230323b7101f6259bdd87e45e6917"
     }
   ],
-  "source_tree": "9c7cb346b427311df3ca79047f55520e07aaba18"
+  "source_tree": "1bdf1045027a1b877478aa05e71445b486282a80"
 }

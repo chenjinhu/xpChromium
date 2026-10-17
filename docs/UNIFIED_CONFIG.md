@@ -27,7 +27,7 @@ WebView 在宿主进程初始化时自动读取固定路径：
 }
 ```
 
-保存为 UTF-8 JSON。完整示例见 [fingerprint.example.json](../examples/fingerprint.json)。三个顶层字段均为必填，不能增加其他顶层字段。`settings` 字段不带 `chromium.` 前缀，大小写敏感。数字 / 布尔值使用 JSON 原生类型，不能写成字符串。完整字段清单和范围见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
+保存为 UTF-8 JSON。完整示例见 [fingerprint.json](../examples/fingerprint.json)。三个顶层字段均为必填，不能增加其他顶层字段。`settings` 字段不带 `chromium.` 前缀，大小写敏感。数字 / 布尔值使用 JSON 原生类型，不能写成字符串。完整字段清单和范围见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
 
 ## brands 自动生成
 
@@ -59,6 +59,34 @@ WebView 在宿主进程初始化时自动读取固定路径：
 
 这会关闭字段覆盖、定制代理和 Canvas 扰动；早期 Window/document/navigator 的 IDL 定制仍保留。
 
+
+## 按出口 IP 分配地理位置
+
+可直接使用 [fingerprint-ip.json](../examples/fingerprint-ip.json)。
+
+在 settings 中启用：
+
+```json
+{"version":1,"enabled":true,"settings":{"geolocation.mode":"ip"}}
+```
+
+`geolocation.mode` 支持 `native` / `ip`，省略时保留原生定位。只有 enabled=true 且 mode=ip 才进行 IP 查询。支持与 `network.proxy` 同时配置，例如：
+
+```json
+{"version":1,"enabled":true,"settings":{"network.proxy":"socks5://192.0.2.1:1080","geolocation.mode":"ip"}}
+```
+
+- 页面通过原有安全上下文、Permissions Policy 和宿主定位许可检查后，首次定位请求触发查询。查询使用该 WebContents 所在 StoragePartition 的网络工厂，因此使用相同网络上下文及其代理设置。
+- 默认服务为 `https://ipwho.is/`。可通过 `geolocation.endpoint` 指定自有 HTTPS 服务；响应需包含顶层 latitude / longitude 数值或合法数字字符串。success 若存在必须为 true。经纬度分别限制在 [-90,90] / [-180,180]。
+- 服务会看到本次查询的出口 IP；不发送 Cookie、GPS 或 Wi-Fi 扫描数据，不跟随重定向。请求超时 10 秒，响应最多 65536 字节，不记录 URL / API Key / IP / 坐标日志。
+- `geolocation.accuracy` 为报告半径，单位米，范围 1000..10000000，默认 50000。IP 数据库只能提供近似位置，该数值不保证数据库具备对应真实精度。
+- 查询完成前，定位绑定进入等待队列。成功或失败时均先设置原生 GeolocationContext 的 override，再绑定请求；失败返回 POSITION_UNAVAILABLE，不启用系统 GPS 作为后备。
+- 同一 WebContents 的成功结果固定保存到该 WebContents 销毁。查询失败后，新定位请求可在 30 秒冷却结束后重试；同时到来的请求合并为一次查询。修改启动配置仍需完整重启宿主进程。
+- 原生 getCurrentPosition / watchPosition 接口及权限撤销流程保留；DevTools 定位 override 清除后恢复 IP 模式。
+- 本次只接入地理位置，未同步修改语言或时区，亦不提供持续跟踪移动位置。
+
+参考 [VirtualBrowser worker](https://github.com/Virtual-Browser/VirtualBrowser/blob/0c6e8ab41b15fedc7a125b7c4314faa974dd87a9/worker/src/App.vue#L102) 的“出口查询结果 → location”流程独立实现。该仓库公开前端调用 setIpGeo，未公开其 Chromium 内核处理源码，本实现未复制其内核代码。
+
 ## 加载时机和失败处理
 
 - 宿主浏览器进程加载 WebView 原生库并完成 JNI 初始化后立即读取一次，再冻结配置；早于后续浏览器启动和网络上下文创建。renderer 不访问外部存储，只接收浏览器传递的快照。
@@ -82,12 +110,15 @@ WebView 内核运行在宿主 App 的 UID 下，读取此路径使用宿主的�
 实际 Chromium 配置 / 文件集成测试：
 
 ```sh
-gn gen out/Fingerprint-host --root-target=//webview_custom:fingerprint_config_test \
+gn gen out/Fingerprint-host --root-target=//webview_custom:host_tests \
   --args='is_debug=false is_component_build=false symbol_level=0 use_remoteexec=false target_os="linux" target_cpu="x64"'
-autoninja -C out/Fingerprint-host -j 16 fingerprint_config_test
+autoninja -C out/Fingerprint-host -j 16 fingerprint_config_test ip_geolocation_test
 out/Fingerprint-host/fingerprint_config_test
+out/Fingerprint-host/ip_geolocation_test
 ```
 
 覆盖文件缺失、正常读取、空文件、大小上限、目录、FIFO、权限拒绝、非法 JSON，以及配置原子拒绝、并发快照、冻结和新进程导入。`test_auto_brands.py` 执行实际 UA 版本解析和元数据策略方法，类型与上游品牌生成函数边界使用适配器；原生品牌函数与 Java/JNI 自动入口由 APK 编译 / 链接检查。
 
 既有配置 / 请求头、9 项方法回归、网络身份和 81 种 Canvas 组合测试继续保留。宿主实际启动读取、Android 存储权限、页面 / Worker 结果及代理出口仍需真机验证。`smoke.html` 默认按 fillRect 噪声关闭检查；显式开启时加载 `smoke.html?noise=on`。
+
+IP 定位主机测试使用实际 SimpleURLLoader、TestURLLoaderFactory 和 Mojo；替换下游设备上下文，覆盖请求合并、override 先于绑定、数据校验、响应上限、失败冷却、网络超时、权限撤销 / 降级、清除 override 恢复 IP 及销毁。Android 真机代理出口、权限提示、GPS 行为和页面结果仍需设备验证。

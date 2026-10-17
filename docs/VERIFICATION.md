@@ -1,5 +1,21 @@
 # 构建验证记录
 
+## 按出口 IP 分配地理位置
+
+- 源码提交：`9f4b898a58ed183a1fabb060a39b4eeac8eefae4`；源码树：`1bdf1045027a1b877478aa05e71445b486282a80`。
+- 完整 APK 增量构建通过（576 步，10 分 31 秒），最终按已提交源码打包于 2026-10-17 23:24:46（UTC+8）完成。服务器 build-only 脚本已修正源码标记刷新，artifacts/source-commit.txt 与本提交一致。
+- 新增 geolocation.mode / endpoint / accuracy 三项，当前共 53 项配置。默认原生定位；显式 IP 模式在原有定位许可之后，通过该 WebContents 所属 StoragePartition 的网络工厂获取近似经纬度。
+- 实际 Chromium SimpleURLLoader / TestURLLoaderFactory 和 Mojo 集成测试通过；下游设备上下文替换为测试对象。覆盖请求合并、override 先于绑定、成功缓存、数字 / 字符串坐标校验、非法 / 超大响应、网络超时、HTTP 错误、失败冷却、权限撤销 / 降级、DevTools override 清除恢复 IP 和销毁。
+- 使用真实 Chromium 配置存储 / 文件读取测试及新进程导入通过，新增模式 / HTTPS 端点 / 精度范围拒绝测试通过。
+- 既有配置 / 请求头、9 项方法回归、网络身份、自动 brands 的 ASan / UBSan 测试及 81 种 Canvas fillRect 组合通过。
+- 10 个变更 C++ 文件的新增 include 依赖检查通过；测试目录已声明依赖。全部 13 个补丁在独立 Git 索引逐个应用后的源码树均与各原提交一致。
+- APK ZIP 完整性、包名 / 版本、最低 SDK 29、arm64、16 KiB ZIP / ELF 对齐、编译功能标记及签名前后 ZIP CRC / 大小一致性检查通过。
+- 使用用户提供的 RK14 证书在本机签名，私钥未传输，v2 / v3 校验通过。
+- APK：`SystemWebView-158.0.8109.0-arm64-ip-geo-rk14.apk`，329141403 字节；SHA-256：`95db227582bb0bf067efcb07205af6bb36b1ba53cf35d9bd39fb1c54cc8e79d0`。
+- 证书 SHA-256：`cf2ab3818595c4eda08cec72bbe39bc377a30b764a3eebde52536eae01808525`。
+- 尚未进行真机安装、代理出口 / DNS 抓包、宿主定位权限、GPS 行为及页面 getCurrentPosition / watchPosition 验收。测试覆盖队列和网络策略，不替代真实设备验证。
+- 本次不自动调整语言、时区，也不实现每 Profile 独立指纹。参考项目公开前端 / 管理和自动化代码，未公开 Chromium 内核修改，不能以界面选项证明全部底层效果。配置见 [UNIFIED_CONFIG.md](UNIFIED_CONFIG.md)。
+
 ## 启动自动读取文件与 brands 自动生成
 
 - 源码提交：`ac5ae14b50b7a5e8c281b56664d4eef416ec528a`。
