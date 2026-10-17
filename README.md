@@ -1,23 +1,22 @@
 # xpChromium
 
-用于 Android 10+、arm64 的 Chromium WebView 定制补丁仓库。这里只记录自己的修改；Chromium 官方源码及其依赖由官方仓库管理。
+用于 Android 10+、arm64 的 Chromium 浏览器与 WebView 定制补丁仓库。这里只记录自己的修改；Chromium 官方源码及其依赖由官方仓库管理。
 
 | 项目 | 当前值 |
 | --- | --- |
 | Chromium 版本 | `158.0.8109.0` |
 | 官方基线 | `51b3c21991199bc9531e7d296056dd9351554c0c` |
-| 自定义源码提交 | `cfc574e8e4f882047107c3fded8ec3e0f5a6f70a` |
-| 自定义提交数 | 16 |
-| 构建目标 | `system_webview_64_apk` |
-| APK 包名 | `com.android.webview` |
+| 自定义源码提交 | `90a39867b3e2a4037133cbdc3aa65277002adb51` |
+| 自定义提交数 | 18 |
+| 构建目标 | `chrome_public_apk` / `system_webview_64_apk` |
+| APK 包名 | `org.chromium.chrome` / `com.android.webview` |
 
 `chromium.json` 记录基线、自定义提交、最终源码树及各补丁 SHA-256；`patches/series` 记录应用顺序。每个补丁保留原始提交作者、说明和二进制资源差异。`source_head` 是服务器原始开发分支上的提交；重新执行 `git am` 后提交哈希可能不同，通过源码树摘要验证内容一致。
 
 ## 功能和配置
 
+- [独立 Chromium 浏览器安装、配置与测试](docs/CHROMIUM_BROWSER.md)
 - [指纹配置字段、26 个旧补丁的迁移及质量修复](docs/PROPERTY_PATCHES.md)
-- [稳定指纹、代理认证、IP 地区联动和网络限制](docs/IDENTITY_UPGRADE.md)
-- [稳定指纹、代理认证、IP 地区联动和网络限制](docs/IDENTITY_UPGRADE.md)
 - [稳定指纹、代理认证、IP 地区联动和网络限制](docs/IDENTITY_UPGRADE.md)
 - [真实代理、WebRTC 路由和网络身份配置](docs/NETWORK_POLICY.md)
 - [启动文件配置、自动 brands 和生命周期](docs/UNIFIED_CONFIG.md)
@@ -25,7 +24,7 @@
 - [构建、回归和签名验证记录](docs/VERIFICATION.md)
 - [WebView 编译参数](config/webview-arm64.gn)
 
-WebView 初始化时自动读取 `/sdcard/xpChromium/fingerprint.json`，不需要宿主主动调用方法。已经取消系统属性输入和旧的 Java configure API。文件格式、存储权限和自动 brands 规则见 [UNIFIED_CONFIG.md](docs/UNIFIED_CONFIG.md)，示例见 [examples/fingerprint.json](examples/fingerprint.json)。brands / fullVersionList 可省略，自动跟随自定义 UA 的合法 Chrome/版本或实际内核版本；默认关闭字段覆盖、代理和 Canvas 扰动。配置启动时冻结，修改文件后需完整重启宿主进程。
+Chromium 浏览器和 WebView 初始化时自动读取 `/sdcard/xpChromium/fingerprint.json`，不需要宿主主动调用方法。已经取消系统属性输入和旧的 Java configure API。文件格式、存储权限和自动 brands 规则见 [UNIFIED_CONFIG.md](docs/UNIFIED_CONFIG.md)，示例见 [examples/fingerprint.json](examples/fingerprint.json)。brands / fullVersionList 可省略，自动跟随自定义 UA 的合法 Chrome/版本或实际内核版本；默认关闭字段覆盖、代理和 Canvas 扰动。配置启动时冻结，修改文件后需完整重启宿主进程。
 
 通过 `geolocation.mode=ip` 可在定位获准后按当前 WebView 的网络出口查询近似位置，失败返回不可用；默认使用原生定位。配置示例见 [fingerprint-ip.json](examples/fingerprint-ip.json)。设置 `regional.mode=ip` 后会同时设置 navigator / Accept-Language / Intl locale / Date 时区，并在首个页面提交前完成 renderer 确认。稳定指纹示例见 [fingerprint.identity.json](examples/fingerprint.identity.json)。新增能力默认关闭，详见 [IDENTITY_UPGRADE.md](docs/IDENTITY_UPGRADE.md)。
 
@@ -53,7 +52,18 @@ git push origin main
 
 `export` 要求源码工作区干净、官方基线仍是祖先、补丁提交为线性历史，并检查版本号。它只导出基线之后的提交，不移动源码分支、不同步上游，也不上传完整 Chromium。
 
-当前服务器的增量编译命令：
+当前服务器编译完整 Chromium 浏览器（使用现有 Android 构建缓存）：
+
+```sh
+cd /home/qiled/chromium-android-latest/src
+export PATH=/home/qiled/depot_tools-webview:$PATH DEPOT_TOOLS_UPDATE=0
+gn gen out/WebView-arm64
+autoninja -C out/WebView-arm64 chrome_public_apk -j 12
+```
+
+输出 `out/WebView-arm64/apks/ChromePublic.apk`。浏览器安装、文件权限及检查页面见 [CHROMIUM_BROWSER.md](docs/CHROMIUM_BROWSER.md)。
+
+WebView 的增量编译命令：
 
 ```sh
 CHROMIUM_WEBVIEW_BUILD_ONLY=1 /home/qiled/chromium-android-latest/run-webview-build.sh

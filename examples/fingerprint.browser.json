@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "enabled": true,
+  "settings": {
+    "device.template": "android-arm64",
+    "fingerprint.seed": "xpchromium-local-browser-test",
+    "fingerprint.noise": true,
+    "regional.mode": "manual",
+    "regional.languages": ["zh-CN", "zh"],
+    "regional.timezone": "Asia/Shanghai"
+  }
+}

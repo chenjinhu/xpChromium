@@ -4,8 +4,8 @@
 <title>xpChromium 身份检查</title>
 <style>body{font:16px system-ui;max-width:960px;margin:30px auto;padding:16px}pre{white-space:pre-wrap}button{padding:10px}</style>
 <h1>xpChromium 身份检查</h1>
-<p>此页面在当前 WebView 内检查接口一致性。语言、时区、DNT 可用 URL 参数 language、timezone、dnt 指定期望值；noise=1 要求图像扰动生效。</p>
-<button id="run">重新检查</button> <button id="speak">播放首个可用语音</button>
+<p>此页面在当前 Chromium 或 WebView 内检查接口一致性。语言、时区、DNT 可用 URL 参数 language、timezone、dnt 指定期望值；noise=1 要求图像扰动生效。</p>
+<button id="run">重新检查</button> <button id="speak">播放首个可用语音</button> <button id="locate">检查定位</button>
 <pre id="results"></pre>
 <script>
 'use strict';
@@ -34,6 +34,56 @@ async function run() {
   if(expected.has('language')) assert(navigator.language===expected.get('language'),'navigator.language');
   if(expected.has('timezone')) assert(tz===expected.get('timezone'),'Intl timezone');
   if(expected.has('dnt')) assert(navigator.doNotTrack===expected.get('dnt'),'navigator.doNotTrack');
+ });
+ if(expected.get('headers')==='1') await test('HTTP 请求头与页面身份一致', async () => {
+  const response=await fetch('/headers',{cache:'no-store'});
+  assert(response.ok,'请求头检查服务不可用');
+  const headers=await response.json();output.textContent+=JSON.stringify(headers,null,2)+'\n';
+  assert(headers['User-Agent']===navigator.userAgent,'HTTP User-Agent');
+  assert(headers['Accept-Language']?.split(',')[0].toLowerCase()===navigator.language.toLowerCase(),'HTTP Accept-Language');
+  if(navigator.userAgentData) {
+   const serialize=brands=>brands.map(({brand,version})=>JSON.stringify(brand)+';v='+JSON.stringify(version)).join(', ');
+   assert(headers['Sec-CH-UA']===serialize(navigator.userAgentData.brands),'HTTP brands');
+   assert(headers['Sec-CH-UA-Mobile']===(navigator.userAgentData.mobile?'?1':'?0'),'HTTP mobile');
+   const high=await navigator.userAgentData.getHighEntropyValues(['fullVersionList','architecture','bitness','model','platformVersion']);
+   output.textContent+='UA high entropy='+JSON.stringify(high,null,2)+'\n';
+   if(headers['Sec-CH-UA-Full-Version-List']) assert(headers['Sec-CH-UA-Full-Version-List']===serialize(high.fullVersionList),'HTTP fullVersionList');
+   for(const [key,field] of [['Sec-CH-UA-Arch','architecture'],['Sec-CH-UA-Bitness','bitness'],['Sec-CH-UA-Model','model'],['Sec-CH-UA-Platform-Version','platformVersion']]) {
+    if(headers[key]!==null) assert(headers[key]===JSON.stringify(high[field]),'HTTP '+field);
+   }
+  }
+  if(expected.has('dnt')) assert(headers.DNT===expected.get('dnt'),'HTTP DNT');
+  if(expected.has('requestedWith')) assert((headers['X-Requested-With']??'')===expected.get('requestedWith'),'HTTP X-Requested-With');
+ });
+ await test('Dedicated Worker 与页面身份一致', async () => {
+  const source = `onmessage = () => {
+   const canvas = new OffscreenCanvas(96,48), ctx = canvas.getContext('2d');
+   ctx.fillStyle='#ff8040';ctx.fillRect(0,0,96,48);
+   postMessage({userAgent:navigator.userAgent,languages:Array.from(navigator.languages),
+    timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,
+    locale:Intl.NumberFormat().resolvedOptions().locale,offset:new Date().getTimezoneOffset(),
+    hardwareConcurrency:navigator.hardwareConcurrency,
+    pixels:Array.from(ctx.getImageData(0,0,96,48).data)});
+  };`;
+  const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));
+  const worker=new Worker(url);
+  try {
+   const actual=await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(new Error('Worker 响应超时')),10000);
+    worker.onmessage=event=>{clearTimeout(timer);resolve(event.data);};
+    worker.onerror=event=>{clearTimeout(timer);reject(new Error(event.message));};
+    worker.postMessage('check');
+   });
+   assert(actual.userAgent===navigator.userAgent,'Worker UA');
+   assert(equal(actual.languages,navigator.languages),'Worker languages');
+   assert(actual.timezone===Intl.DateTimeFormat().resolvedOptions().timeZone,'Worker timezone');
+   assert(actual.locale===Intl.NumberFormat().resolvedOptions().locale,'Worker Intl locale');
+   assert(actual.offset===new Date().getTimezoneOffset(),'Worker Date offset');
+   assert(actual.hardwareConcurrency===navigator.hardwareConcurrency,'Worker hardwareConcurrency');
+   const c=make(),ctx=c.getContext('2d');ctx.fillStyle='#ff8040';ctx.fillRect(0,0,96,48);
+   assert(equal(actual.pixels,ctx.getImageData(0,0,96,48).data),'Worker Canvas');
+   const {pixels,...identity}=actual;output.textContent+=JSON.stringify(identity,null,2)+'\n';
+  } finally {worker.terminate();URL.revokeObjectURL(url);}
  });
  await test('Canvas 全图/子区域/PNG/Blob/OffscreenCanvas', async () => {
   const c=make(),ctx=c.getContext('2d');ctx.fillStyle='#ff8040';ctx.fillRect(0,0,96,48);
@@ -102,6 +152,12 @@ document.querySelector('#speak').onclick=()=>{
  const voices=speechSynthesis.getVoices(),utterance=new SpeechSynthesisUtterance('xpChromium voice test');
  if(voices[0]) utterance.voice=voices[0];utterance.onerror=event=>output.textContent+='\nspeech error='+event.error;
  speechSynthesis.speak(utterance);
+};
+document.querySelector('#locate').onclick=()=>{
+ navigator.geolocation.getCurrentPosition(
+  result=>output.textContent+='\n位置='+JSON.stringify({latitude:result.coords.latitude,longitude:result.coords.longitude,accuracy:result.coords.accuracy}),
+  error=>output.textContent+='\n定位失败='+JSON.stringify({code:error.code,message:error.message}),
+  {timeout:45000,maximumAge:0});
 };
 run();
 </script>

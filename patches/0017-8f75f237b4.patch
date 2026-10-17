@@ -1,0 +1,1244 @@
+From 8f75f237b4c9d4370af2c67d4a8dd8f3c166a61a Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sun, 18 Oct 2026 02:30:06 +0800
+Subject: [PATCH] Enable the standalone Android Chromium fingerprint test
+ browser
+
+Reuse native startup configuration, proxy authentication and IP coordination without linking the WebView embedder. Load the same startup file before browser network contexts, propagate redacted snapshots to all renderers, await regional IPC before commits, and preserve Chrome geolocation permissions. Apply network policies to browser and profile requests, Worker preferences, WebRTC, WebTransport and native Requested-With / User-Agent headers. Declare scoped-storage access for this test browser.
+
+Validated with native configuration, pixel/audio, region and IP-location suites, 44 network/auth/transport/header cases, include and production GN checks, and compiled Chrome adapter translation units. Device execution remains to be validated.
+
+diff --git a/android_webview/browser/BUILD.gn b/android_webview/browser/BUILD.gn
+index e01ac9d53937ca60bf42934c7ee7805444c761c6..51d4fa973f09a228b8f4597d6ee47b1d0236dbfa 100644
+--- a/android_webview/browser/BUILD.gn
++++ b/android_webview/browser/BUILD.gn
+@@ -45,6 +45,37 @@ source_set("render_process") {
+   ]
+ }
+ 
++# Native startup identity shared by WebView and the standalone Android browser.
++# This target has no WebView Java, JNI, renderer or embedder dependency.
++source_set("startup_identity") {
++  sources = [
++    "aw_fingerprint_config_file.cc",
++    "aw_fingerprint_config_file.h",
++    "aw_identity_coordinator.cc",
++    "aw_identity_coordinator.h",
++    "aw_identity_data.cc",
++    "aw_identity_data.h",
++    "aw_ip_geolocation_context.cc",
++    "aw_ip_geolocation_context.h",
++    "network_service/aw_network_property_policy.cc",
++    "network_service/aw_network_property_policy.h",
++    "network_service/aw_proxy_config_monitor.cc",
++    "network_service/aw_proxy_config_monitor.h",
++  ]
++  public_deps = [
++    "//base",
++    "//content/public/browser",
++    "//mojo/public/cpp/bindings",
++    "//net",
++    "//services/device/public/mojom",
++    "//services/network/public/cpp",
++    "//services/network/public/mojom",
++    "//third_party/blink/public/common",
++    "//url",
++  ]
++  deps = [ "//services/cert_verifier/public/mojom" ]
++}
++
+ source_set("browser") {
+   sources = [
+     "android_protocol_handler.cc",
+@@ -101,20 +132,12 @@ source_set("browser") {
+     "aw_field_trials.cc",
+     "aw_field_trials.h",
+     "aw_fingerprint_config.cc",
+-    "aw_fingerprint_config_file.cc",
+-    "aw_fingerprint_config_file.h",
+     "aw_http_auth_handler.cc",
+     "aw_http_auth_handler.h",
+     "aw_http_cache_manager.cc",
+     "aw_http_cache_manager.h",
+-    "aw_identity_coordinator.cc",
+-    "aw_identity_coordinator.h",
+-    "aw_identity_data.cc",
+-    "aw_identity_data.h",
+     "aw_identity_navigation_throttle.cc",
+     "aw_identity_navigation_throttle.h",
+-    "aw_ip_geolocation_context.cc",
+-    "aw_ip_geolocation_context.h",
+     "aw_javascript_dialog_manager.cc",
+     "aw_javascript_dialog_manager.h",
+     "aw_metrics_service_client_delegate.cc",
+@@ -193,10 +216,6 @@ source_set("browser") {
+     "network_service/aw_network_change_notifier.h",
+     "network_service/aw_network_change_notifier_factory.cc",
+     "network_service/aw_network_change_notifier_factory.h",
+-    "network_service/aw_network_property_policy.cc",
+-    "network_service/aw_network_property_policy.h",
+-    "network_service/aw_proxy_config_monitor.cc",
+-    "network_service/aw_proxy_config_monitor.h",
+     "network_service/aw_proxying_restricted_cookie_manager.cc",
+     "network_service/aw_proxying_restricted_cookie_manager.h",
+     "network_service/aw_proxying_url_loader_factory.cc",
+@@ -294,6 +313,7 @@ source_set("browser") {
+ 
+   deps = [
+     ":render_process",
++    ":startup_identity",
+     "//android_webview:browser_jni_headers",
+     "//android_webview:generate_components_strings",
+     "//android_webview/browser/gfx",
+diff --git a/chrome/android/java/AndroidManifest.xml b/chrome/android/java/AndroidManifest.xml
+index 5ca5cd7457c663599ab47425d5d30b7b20d37d3d..9237e3bbd6f24d4f685ca8e0873805ac25ca294e 100644
+--- a/chrome/android/java/AndroidManifest.xml
++++ b/chrome/android/java/AndroidManifest.xml
+@@ -97,6 +97,8 @@ by a child template that "extends" this file.
+     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+ 
+     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
++    <!-- xpChromium test builds read /sdcard/xpChromium/fingerprint.json. -->
++    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+ 
+     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+@@ -224,6 +226,7 @@ by a child template that "extends" this file.
+         android:label="{% block application_label %}@string/app_name{% endblock %}"
+         android:memtagMode="async"
+         android:largeHeap="false"
++        android:requestLegacyExternalStorage="true"
+         android:manageSpaceActivity="@string/manage_space_activity"
+         android:supportsRtl="true"
+         android:zygotePreloadName="{{ zygote_preload_class }}"
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index cfc3da5e9eee3752d05cf6901671eb6c06cb3675..f9d891e1bb8538ff8f9c8052c2b9553a28928cec 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1863,6 +1863,7 @@ source_set("core") {
+   }
+ 
+   if (is_android) {
++    deps += [ "//chrome/browser/android/fingerprint" ]
+     sources += [
+       "after_startup_task_utils_android.cc",
+       "browser_process_platform_part_android.cc",
+diff --git a/chrome/browser/android/fingerprint/BUILD.gn b/chrome/browser/android/fingerprint/BUILD.gn
+new file mode 100644
+index 0000000000000000000000000000000000000000..b749f5de5b520a93dbf885bd2b09f1294954f5ac
+--- /dev/null
++++ b/chrome/browser/android/fingerprint/BUILD.gn
+@@ -0,0 +1,28 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++assert(is_android)
++
++source_set("fingerprint") {
++  sources = [
++    "fingerprint_startup.cc",
++    "fingerprint_startup.h",
++    "identity_navigation_throttle.cc",
++    "identity_navigation_throttle.h",
++  ]
++  public_deps = [
++    "//content/public/browser",
++    "//services/device/public/mojom",
++    "//services/network/public/mojom",
++    "//third_party/blink/public/common",
++  ]
++  deps = [
++    "//android_webview/browser:startup_identity",
++    "//base",
++    "//chrome/common:mojo_bindings",
++    "//ipc",
++    "//mojo/public/cpp/bindings",
++    "//net",
++    "//services/device/public/mojom:device_service",
++  ]
++}
+diff --git a/chrome/browser/android/fingerprint/DEPS b/chrome/browser/android/fingerprint/DEPS
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b87ad3ab9ac9338c9d72ad7f1cf1f1758b79184
+--- /dev/null
++++ b/chrome/browser/android/fingerprint/DEPS
+@@ -0,0 +1,7 @@
++include_rules = [
++  "+android_webview/browser/aw_fingerprint_config_file.h",
++  "+android_webview/browser/aw_identity_coordinator.h",
++  "+android_webview/browser/aw_ip_geolocation_context.h",
++  "+android_webview/browser/network_service/aw_network_property_policy.h",
++  "+android_webview/browser/network_service/aw_proxy_config_monitor.h",
++]
+diff --git a/chrome/browser/android/fingerprint/fingerprint_startup.cc b/chrome/browser/android/fingerprint/fingerprint_startup.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..488cf5f944d1b892c57350f9d08294940b293fbd
+--- /dev/null
++++ b/chrome/browser/android/fingerprint/fingerprint_startup.cc
+@@ -0,0 +1,161 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/android/fingerprint/fingerprint_startup.h"
++
++#include <mutex>
++
++#include "android_webview/browser/aw_fingerprint_config_file.h"
++#include "android_webview/browser/aw_identity_coordinator.h"
++#include "android_webview/browser/aw_ip_geolocation_context.h"
++#include "android_webview/browser/network_service/aw_network_property_policy.h"
++#include "android_webview/browser/network_service/aw_proxy_config_monitor.h"
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/android/fingerprint/identity_navigation_throttle.h"
++#include "content/public/browser/device_service.h"
++#include "content/public/browser/navigation_throttle_registry.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/storage_partition.h"
++#include "content/public/browser/web_contents.h"
++#include "services/device/public/mojom/device_service.mojom.h"
++#include "services/network/public/mojom/network_context.mojom.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
++#include "third_party/blink/public/common/webview/property_overrides.h"
++#include "third_party/blink/public/common/webview/regional_settings.h"
++namespace xpchromium {
++void InitializeFingerprint() {
++  static std::once_flag once;
++  std::call_once(once, [] {
++    std::string error;
++    const auto status = android_webview::ApplyFingerprintConfigFile(
++        base::FilePath(android_webview::kFingerprintConfigPath), error);
++    if (status == android_webview::FingerprintFileStatus::kError) {
++      LOG(ERROR) << "xpChromium configuration rejected; network blocked: "
++                 << error;
++    } else if (status == android_webview::FingerprintFileStatus::kLoaded) {
++      LOG(INFO) << "xpChromium fingerprint configuration loaded";
++    } else {
++      LOG(INFO) << "xpChromium fingerprint file absent; native defaults";
++    }
++    blink::FreezeWebViewFingerprint();
++    if (HasIdentityProxy() || blink::WebViewPropertyOverrides().GetBool(
++                                  "chromium.network.block_local") == true) {
++      base::CommandLine::ForCurrentProcess()->AppendSwitch("disable-quic");
++    }
++  });
++}
++void ConfigureNetwork(network::mojom::NetworkContextParams& params) {
++  android_webview::AwIdentityCoordinator::Get();
++  const blink::WebViewPropertyOverrides identity;
++  const auto regional_mode = identity.GetString("chromium.regional.mode");
++  params.identity_force_accept_language =
++      regional_mode == "ip" ||
++      (regional_mode == "manual" &&
++       !identity.GetStringList("chromium.regional.languages").empty());
++  if (auto language = blink::GetWebViewRegionalAcceptLanguage()) {
++    params.accept_language = *language;
++  }
++  params.identity_block_local =
++      identity.GetBool("chromium.network.block_local").value_or(false);
++  for (int port : identity.GetIntegerList("chromium.network.blocked_ports")) {
++    params.identity_blocked_ports.push_back(static_cast<uint16_t>(port));
++  }
++  if (!params.initial_ssl_config) {
++    params.initial_ssl_config = network::mojom::SSLConfig::New();
++  }
++  for (int cipher :
++       identity.GetIntegerList("chromium.network.tls_disabled_ciphers")) {
++    params.initial_ssl_config->disabled_cipher_suites.push_back(
++        static_cast<uint16_t>(cipher));
++  }
++  if (auto dnt = identity.GetBool("chromium.privacy.doNotTrack")) {
++    params.identity_do_not_track = *dnt ? 1 : 0;
++  }
++  if (auto ua = identity.UserAgent()) {
++    params.identity_user_agent = *ua;
++  }
++  if (auto xrw = identity.RequestedWith()) {
++    params.identity_requested_with = *xrw;
++  }
++  if (HasIdentityProxy()) {
++    // Replace Chrome's profile proxy monitor only when a pinned identity proxy
++    // is configured. The shared monitor handles API resolution and restarts.
++    params.proxy_config_client_receiver.reset();
++    android_webview::AwProxyConfigMonitor::GetInstance()
++        ->AddProxyToNetworkContextParams(&params);
++  }
++}
++bool HasIdentityProxy() {
++  return android_webview::AwNetworkPropertyPolicy::Get()
++      .proxy_config()
++      .has_value();
++}
++void UpdateRendererPreferences(blink::RendererPreferences& prefs) {
++  android_webview::AwIdentityCoordinator::Get();
++  const auto regional = blink::GetWebViewRegionalSettings();
++  if (!regional->languages.empty()) {
++    prefs.accept_languages = base::JoinString(regional->languages, ",");
++  }
++  android_webview::AwNetworkPropertyPolicy::Get().ApplyWebRtcPolicy(prefs);
++  if (auto dnt = blink::WebViewPropertyOverrides().GetBool(
++          "chromium.privacy.doNotTrack")) {
++    prefs.enable_do_not_track = *dnt;
++  }
++}
++void AddIdentityNavigationThrottle(
++    content::NavigationThrottleRegistry& registry) {
++  if (android_webview::AwIdentityCoordinator::Get().active()) {
++    registry.AddThrottle(
++        std::make_unique<IdentityNavigationThrottle>(registry));
++  }
++}
++device::mojom::GeolocationContext* GetGeolocationContext(
++    content::WebContents* contents) {
++  const blink::WebViewPropertyOverrides config;
++  if (!config.enabled() ||
++      config.GetString("chromium.geolocation.mode") != "ip") {
++    return nullptr;
++  }
++  static const char kContextKey = 0;
++  auto* context = static_cast<android_webview::AwIpGeolocationContext*>(
++      contents->GetUserData(&kContextKey));
++  if (!context) {
++    mojo::Remote<device::mojom::GeolocationContext> device_context;
++    content::GetDeviceService().BindGeolocationContext(
++        device_context.BindNewPipeAndPassReceiver());
++    auto owned = std::make_unique<android_webview::AwIpGeolocationContext>(
++        contents->GetPrimaryMainFrame()
++            ->GetStoragePartition()
++            ->GetURLLoaderFactoryForBrowserProcess(),
++        std::move(device_context),
++        GURL(config.GetString("chromium.geolocation.endpoint")
++                 .value_or("https://ipwho.is/")),
++        config.GetDouble("chromium.geolocation.accuracy", 1000, 1e7)
++            .value_or(50000),
++        base::BindRepeating(
++            [](base::WeakPtr<content::WebContents> contents,
++               base::OnceCallback<void(device::mojom::GeopositionResultPtr)>
++                   callback) {
++              if (contents) {
++                android_webview::AwIdentityCoordinator::Get().Geolocation(
++                    contents.get(), std::move(callback));
++              } else {
++                std::move(callback).Run(
++                    device::mojom::GeopositionResult::NewError(
++                        device::mojom::GeopositionError::New(
++                            device::mojom::GeopositionErrorCode::
++                                kPositionUnavailable,
++                            "WebContents closed", "")));
++              }
++            },
++            contents->GetWeakPtr()));
++    context = owned.get();
++    contents->SetUserData(&kContextKey, std::move(owned));
++  }
++  return context;
++}
++}  // namespace xpchromium
+diff --git a/chrome/browser/android/fingerprint/fingerprint_startup.h b/chrome/browser/android/fingerprint/fingerprint_startup.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..771c23fff620233b19fed1314aa4bf21e51a1a44
+--- /dev/null
++++ b/chrome/browser/android/fingerprint/fingerprint_startup.h
+@@ -0,0 +1,25 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_ANDROID_FINGERPRINT_FINGERPRINT_STARTUP_H_
++#define CHROME_BROWSER_ANDROID_FINGERPRINT_FINGERPRINT_STARTUP_H_
++#include "services/device/public/mojom/geolocation_context.mojom-forward.h"
++#include "services/network/public/mojom/network_context.mojom-forward.h"
++namespace blink {
++struct RendererPreferences;
++}
++namespace content {
++class WebContents;
++class NavigationThrottleRegistry;
++}  // namespace content
++namespace xpchromium {
++void InitializeFingerprint();
++void ConfigureNetwork(network::mojom::NetworkContextParams& params);
++void UpdateRendererPreferences(blink::RendererPreferences& prefs);
++void AddIdentityNavigationThrottle(
++    content::NavigationThrottleRegistry& registry);
++bool HasIdentityProxy();
++device::mojom::GeolocationContext* GetGeolocationContext(
++    content::WebContents* contents);
++}  // namespace xpchromium
++#endif
+diff --git a/chrome/browser/android/fingerprint/identity_navigation_throttle.cc b/chrome/browser/android/fingerprint/identity_navigation_throttle.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..985f36b485cc62967192665bea6f1a2b04945e42
+--- /dev/null
++++ b/chrome/browser/android/fingerprint/identity_navigation_throttle.cc
+@@ -0,0 +1,123 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/android/fingerprint/identity_navigation_throttle.h"
++
++#include "android_webview/browser/aw_identity_coordinator.h"
++#include "base/functional/bind.h"
++#include "base/strings/string_util.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/navigation_throttle_registry.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
++#include "ipc/ipc_channel_proxy.h"
++#include "net/base/net_errors.h"
++#include "net/http/http_util.h"
++#include "third_party/blink/public/common/webview/regional_settings.h"
++namespace xpchromium {
++IdentityNavigationThrottle::IdentityNavigationThrottle(
++    content::NavigationThrottleRegistry& registry)
++    : NavigationThrottle(registry) {}
++IdentityNavigationThrottle::~IdentityNavigationThrottle() = default;
++const char* IdentityNavigationThrottle::GetNameForLogging() {
++  return "IdentityNavigationThrottle";
++}
++content::NavigationThrottle::ThrottleCheckResult
++IdentityNavigationThrottle::WillStartRequest() {
++  return Prepare(false);
++}
++content::NavigationThrottle::ThrottleCheckResult
++IdentityNavigationThrottle::WillCommitWithoutUrlLoader() {
++  return Prepare(true);
++}
++content::NavigationThrottle::ThrottleCheckResult
++IdentityNavigationThrottle::Prepare(bool committing) {
++  committing_ = committing;
++  timer_.Start(FROM_HERE, base::Seconds(45),
++               base::BindOnce(&IdentityNavigationThrottle::Fail,
++                              weak_factory_.GetWeakPtr()));
++  android_webview::AwIdentityCoordinator::Get().Prepare(
++      navigation_handle()->GetWebContents(),
++      base::BindOnce(&IdentityNavigationThrottle::OnPrepared,
++                     weak_factory_.GetWeakPtr()));
++  return DEFER;
++}
++void IdentityNavigationThrottle::SetLanguageHeader() {
++  const auto regional = blink::GetWebViewRegionalSettings();
++  if (!regional->languages.empty()) {
++    navigation_handle()->SetRequestHeader(
++        "Accept-Language", net::HttpUtil::GenerateAcceptLanguageHeader(
++                               base::JoinString(regional->languages, ",")));
++  }
++}
++content::NavigationThrottle::ThrottleCheckResult
++IdentityNavigationThrottle::WillRedirectRequest() {
++  SetLanguageHeader();
++  return PROCEED;
++}
++void IdentityNavigationThrottle::OnPrepared(bool ready) {
++  if (!ready) {
++    Fail();
++    return;
++  }
++  if (committing_) {
++    const auto result = SyncRenderer();
++    if (result.action() == PROCEED) {
++      timer_.Stop();
++      Resume();
++    } else if (result.action() != DEFER) {
++      timer_.Stop();
++      CancelDeferredNavigation(result);
++    }
++  } else {
++    SetLanguageHeader();
++    timer_.Stop();
++    Resume();
++  }
++}
++content::NavigationThrottle::ThrottleCheckResult
++IdentityNavigationThrottle::WillProcessResponse() {
++  return SyncRenderer();
++}
++content::NavigationThrottle::ThrottleCheckResult
++IdentityNavigationThrottle::SyncRenderer() {
++  const auto regional = blink::GetWebViewRegionalSettings();
++  if (regional->languages.empty() && regional->timezone.empty()) {
++    return PROCEED;
++  }
++  auto* frame = navigation_handle()->GetRenderFrameHost();
++  if (!frame) {
++    return PROCEED;  // Download or HTTP 204; no document commits.
++  }
++  auto* channel = frame->GetProcess()->GetChannel();
++  if (!channel) {
++    return {CANCEL, net::ERR_FAILED};
++  }
++  channel->GetRemoteAssociatedInterface(&renderer_);
++  renderer_.set_disconnect_handler(base::BindOnce(
++      &IdentityNavigationThrottle::Fail, weak_factory_.GetWeakPtr()));
++  timer_.Start(FROM_HERE, base::Seconds(5),
++               base::BindOnce(&IdentityNavigationThrottle::Fail,
++                              weak_factory_.GetWeakPtr()));
++  renderer_->SetRegionalIdentity(
++      regional->languages, regional->timezone,
++      base::BindOnce(&IdentityNavigationThrottle::OnApplied,
++                     weak_factory_.GetWeakPtr()));
++  return DEFER;
++}
++void IdentityNavigationThrottle::OnApplied(bool applied) {
++  if (!applied) {
++    Fail();
++    return;
++  }
++  timer_.Stop();
++  renderer_.reset();
++  Resume();
++}
++void IdentityNavigationThrottle::Fail() {
++  timer_.Stop();
++  weak_factory_.InvalidateWeakPtrs();
++  renderer_.reset();
++  CancelDeferredNavigation({CANCEL, net::ERR_BLOCKED_BY_ADMINISTRATOR});
++}
++}  // namespace xpchromium
+diff --git a/chrome/browser/android/fingerprint/identity_navigation_throttle.h b/chrome/browser/android/fingerprint/identity_navigation_throttle.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5081566b5780e8d5da7c42bcdf545e2eb3351243
+--- /dev/null
++++ b/chrome/browser/android/fingerprint/identity_navigation_throttle.h
+@@ -0,0 +1,36 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_ANDROID_FINGERPRINT_IDENTITY_NAVIGATION_THROTTLE_H_
++#define CHROME_BROWSER_ANDROID_FINGERPRINT_IDENTITY_NAVIGATION_THROTTLE_H_
++#include "base/memory/weak_ptr.h"
++#include "base/timer/timer.h"
++#include "chrome/common/renderer_configuration.mojom.h"
++#include "content/public/browser/navigation_throttle.h"
++#include "mojo/public/cpp/bindings/associated_remote.h"
++namespace xpchromium {
++class IdentityNavigationThrottle final : public content::NavigationThrottle {
++ public:
++  explicit IdentityNavigationThrottle(
++      content::NavigationThrottleRegistry& registry);
++  ~IdentityNavigationThrottle() override;
++  ThrottleCheckResult WillStartRequest() override;
++  ThrottleCheckResult WillRedirectRequest() override;
++  ThrottleCheckResult WillProcessResponse() override;
++  ThrottleCheckResult WillCommitWithoutUrlLoader() override;
++  const char* GetNameForLogging() override;
++
++ private:
++  ThrottleCheckResult Prepare(bool committing);
++  ThrottleCheckResult SyncRenderer();
++  void OnPrepared(bool ready);
++  void OnApplied(bool applied);
++  void Fail();
++  void SetLanguageHeader();
++  bool committing_ = false;
++  base::OneShotTimer timer_;
++  mojo::AssociatedRemote<chrome::mojom::RendererConfiguration> renderer_;
++  base::WeakPtrFactory<IdentityNavigationThrottle> weak_factory_{this};
++};
++}  // namespace xpchromium
++#endif
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index 226d6a75f720a9ad376dea9ead93016bd13bcb63..5b33bc7558d0504cfd3161ff38392780f59bbb5c 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -150,6 +150,7 @@
+ 
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/notreached.h"
++#include "chrome/browser/android/fingerprint/fingerprint_startup.h"
+ #include "chrome/browser/flags/android/chrome_feature_list.h"
+ #include "chrome/browser/share/share_history.h"
+ #include "chrome/browser/ui/page_info/chrome_page_info_client.h"
+@@ -998,11 +999,12 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
+ // -----------------------------------------------------------------------------
+ // TODO(viettrungluu): move more/rest of BrowserMain() into BrowserMainParts.
+ 
+-
+-
+ // content::BrowserMainParts implementation ------------------------------------
+ 
+ int ChromeBrowserMainParts::PreEarlyInitialization() {
++#if BUILDFLAG(IS_ANDROID)
++  xpchromium::InitializeFingerprint();
++#endif
+   TRACE_EVENT0("startup", "ChromeBrowserMainParts::PreEarlyInitialization");
+   for (auto& chrome_extra_part : chrome_extra_parts_) {
+     chrome_extra_part->PreEarlyInitialization();
+@@ -1401,7 +1403,8 @@ int ChromeBrowserMainParts::PreCreateThreadsImpl() {
+   // Add Site Isolation switches as dictated by policy.
+   auto* command_line = base::CommandLine::ForCurrentProcess();
+   if (command_line->HasSwitch("start-url")) {
+-    LOG(INFO) << "start-url: " << command_line->GetSwitchValueASCII("start-url");
++    LOG(INFO) << "start-url: "
++              << command_line->GetSwitchValueASCII("start-url");
+   }
+   if (local_state->GetBoolean(prefs::kSitePerProcess) &&
+       site_isolation::SiteIsolationPolicy::IsEnterprisePolicyApplicable() &&
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 68bdad5ace525d4aaf6b4ffab63de72c46f233ee..b2602e6303ee22e58574e58c5d94b95457bc89c2 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -15,6 +15,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/base64.h"
+ #include "base/base_switches.h"
+ #include "base/byte_size.h"
+ #include "base/check.h"
+@@ -446,6 +447,7 @@
+ #include "third_party/blink/public/common/navigation/navigation_policy.h"
+ #include "third_party/blink/public/common/permissions/permission_utils.h"
+ #include "third_party/blink/public/common/switches.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
+ #include "third_party/blink/public/mojom/navigation/navigation_params.mojom-forward.h"
+ #include "third_party/blink/public/mojom/navigation/navigation_params.mojom.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom.h"
+@@ -533,7 +535,6 @@
+ #include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
+ #include "chrome/browser/ui/dialogs/browser_dialogs.h"
+ #include "chrome/browser/ui/webui/ash/kerberos/kerberos_in_browser_dialog.h"
+-#include "chrome/common/webui_url_constants.h"
+ #include "chromeos/ash/components/browser_context_helper/browser_context_types.h"
+ #include "chromeos/ash/components/http_auth_dialog/http_auth_dialog.h"
+ #include "chromeos/ash/components/settings/cros_settings.h"
+@@ -546,7 +547,6 @@
+ #include "base/android/android_info.h"
+ #include "base/android/apk_info.h"
+ #include "base/android/application_status_listener.h"
+-#include "base/feature_list.h"
+ #include "chrome/browser/android/customtabs/client_data_header_web_contents_observer.h"  // nogncheck crbug.com/40147906
+ #include "chrome/browser/android/devtools_manager_delegate_android.h"  // nogncheck crbug.com/40147906
+ #include "chrome/browser/android/ntp/new_tab_page_url_handler.h"  // nogncheck crbug.com/40147906
+@@ -579,7 +579,6 @@
+ #include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
+ #include "chrome/browser/digital_credentials/digital_identity_provider_desktop.h"
+ #include "chrome/browser/direct_sockets/chrome_direct_sockets_delegate.h"
+-#include "chrome/browser/glic/public/features.h"
+ #include "chrome/browser/global_features.h"
+ #include "chrome/browser/headless/headless_command_processor.h"
+ #include "chrome/browser/indigo/onboarding/indigo_onboarding_dialog.h"
+@@ -594,7 +593,6 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+ #include "chrome/browser/ui/chrome_pages.h"
+-#include "chrome/browser/ui/dialogs/browser_dialogs.h"
+ #include "chrome/browser/ui/waap/waap_utils.h"
+ #include "chrome/browser/ui/webui/chrome_content_browser_client_webui_part.h"
+ #include "chrome/browser/ui/webui/util/webui_util_desktop.h"
+@@ -655,6 +653,7 @@
+ 
+ #if BUILDFLAG(IS_ANDROID)
+ #include "base/android/device_info.h"
++#include "chrome/browser/android/fingerprint/fingerprint_startup.h"
+ #include "components/crash/content/browser/crash_handler_host_linux.h"
+ #include "components/permissions/android/android_permission_util.h"
+ #include "components/permissions/android/permissions_reprompt_controller_android.h"
+@@ -701,7 +700,6 @@
+ #include "extensions/common/mojom/api_permission_id.mojom.h"
+ #include "extensions/common/mojom/context_type.mojom.h"
+ #include "extensions/common/permissions/permissions_data.h"
+-#include "extensions/common/switches.h"
+ #include "extensions/common/user_script.h"
+ 
+ #if BUILDFLAG(ENABLE_GUEST_VIEW)
+@@ -712,7 +710,6 @@
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+-#include "chrome/browser/web_applications/web_app_utils.h"
+ #include "extensions/browser/mime_handler/mime_handler_fallback_url_loader_request_interceptor.h"
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ #endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+@@ -720,7 +717,6 @@
+ #if !BUILDFLAG(ENABLE_EXTENSIONS_CORE) && BUILDFLAG(ENABLE_GUEST_VIEW)
+ // Below are includes for when guest view is enabled, but extensions are *not*.
+ #include "chrome/browser/android/guest_view/chrome_content_browser_client_guest_view_part.h"
+-#include "components/guest_view/browser/guest_view_base.h"
+ #include "components/guest_view/browser/slim_web_view/slim_web_view_url_loader_factory_interceptor.h"  // nogncheck
+ #endif
+ 
+@@ -3094,6 +3090,15 @@ void AppendExtraCommandLineSwitchesFromPrefs(base::CommandLine* command_line,
+ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+     base::CommandLine* command_line,
+     int child_process_id) {
++#if BUILDFLAG(IS_ANDROID)
++  if (command_line->GetSwitchValueASCII(switches::kProcessType) ==
++      switches::kRendererProcess) {
++    command_line->AppendSwitchASCII(
++        blink::kWebViewFingerprintSwitch,
++        base::Base64Encode(
++            blink::GetWebViewFingerprintConfig()->renderer_serialized));
++  }
++#endif
+   crash_keys::AppendStringAnnotationsCommandLineSwitch(command_line);
+ #if BUILDFLAG(IS_MAC)
+   std::unique_ptr<metrics::ClientInfo> client_info =
+@@ -5756,11 +5761,17 @@ void ChromeContentBrowserClient::RemovePresentationObserver(
+ 
+ void ChromeContentBrowserClient::CreateThrottlesForNavigation(
+     content::NavigationThrottleRegistry& registry) {
++#if BUILDFLAG(IS_ANDROID)
++  xpchromium::AddIdentityNavigationThrottle(registry);
++#endif
+   CreateAndAddChromeThrottlesForNavigation(registry);
+ }
+ 
+ void ChromeContentBrowserClient::CreateThrottlesForCommitWithoutUrlLoader(
+     content::NavigationThrottleRegistry& registry) {
++#if BUILDFLAG(IS_ANDROID)
++  xpchromium::AddIdentityNavigationThrottle(registry);
++#endif
+   CreateAndAddChromeThrottlesForCommitWithoutUrlLoader(registry);
+ }
+ 
+@@ -7142,6 +7153,17 @@ void ChromeContentBrowserClient::WillCreateWebTransport(
+     mojo::PendingRemote<network::mojom::WebTransportHandshakeClient>
+         handshake_client,
+     WillCreateWebTransportCallback callback) {
++#if BUILDFLAG(IS_ANDROID)
++  if (xpchromium::HasIdentityProxy()) {
++    auto error = network::mojom::WebTransportError::New();
++    error->net_error = net::ERR_BLOCKED_BY_CLIENT;
++    error->details =
++        "WebTransport is unavailable with a configured identity proxy.";
++    error->safe_to_report_details = true;
++    std::move(callback).Run(std::move(handshake_client), std::move(error));
++    return;
++  }
++#endif
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   // TODO(crbug.com/40195467): Add a unit test which calls
+@@ -7228,7 +7250,18 @@ void ChromeContentBrowserClient::ConfigureNetworkContextParams(
+     network_context_params->user_agent = GetUserAgent();
+     network_context_params->accept_language = GetApplicationLocale();
+   }
++#if BUILDFLAG(IS_ANDROID)
++  xpchromium::ConfigureNetwork(*network_context_params);
++#endif
++}
++
++#if BUILDFLAG(IS_ANDROID)
++device::mojom::GeolocationContext*
++ChromeContentBrowserClient::GetGeolocationContextOverride(
++    content::WebContents* contents) {
++  return xpchromium::GetGeolocationContext(contents);
+ }
++#endif
+ 
+ std::vector<base::FilePath>
+ ChromeContentBrowserClient::GetNetworkContextsParentDirectory() {
+diff --git a/chrome/browser/chrome_content_browser_client.h b/chrome/browser/chrome_content_browser_client.h
+index bffda08bf22d4512a28dd4cc4be7f67b64436f40..ad171d6b87e6f12961333b1f5f276fea018122c5 100644
+--- a/chrome/browser/chrome_content_browser_client.h
++++ b/chrome/browser/chrome_content_browser_client.h
+@@ -766,6 +766,10 @@ class ChromeContentBrowserClient : public content::ContentBrowserClient {
+       override;
+   void OnNetworkServiceCreated(
+       network::mojom::NetworkService* network_service) override;
++#if BUILDFLAG(IS_ANDROID)
++  device::mojom::GeolocationContext* GetGeolocationContextOverride(
++      content::WebContents* contents) override;
++#endif
+   void ConfigureNetworkContextParams(
+       content::BrowserContext* context,
+       bool in_memory,
+diff --git a/chrome/browser/net/BUILD.gn b/chrome/browser/net/BUILD.gn
+index 3dad5c584377f83092ab7aa063e80d570373d41f..1fc3f1f5dab03733d5142590b71183ca67ca0e7d 100644
+--- a/chrome/browser/net/BUILD.gn
++++ b/chrome/browser/net/BUILD.gn
+@@ -191,6 +191,8 @@ source_set("impl") {
+     "//chrome/browser/ssl",
+     "//chrome/browser/task_manager",
+     "//chrome/browser/webid",
++    "//chrome/common",
++    "//chrome/common:channel_info",
+     "//chrome/common:version_header",
+     "//chrome/common/request_header_integrity:buildflags",
+     "//components/certificate_transparency",
+@@ -207,8 +209,6 @@ source_set("impl") {
+     "//components/enterprise/encryption/cache",
+     "//components/language/core/browser",
+     "//components/link_header_util",
+-    "//chrome/common",
+-    "//chrome/common:channel_info",
+     "//components/metrics",
+     "//components/net_log",
+     "//components/no_state_prefetch/browser",
+@@ -334,6 +334,7 @@ source_set("impl") {
+ 
+   if (is_android) {
+     deps += [
++      "//chrome/browser/android/fingerprint",
+       "//components/enterprise/net/content",
+       "//components/tabs:public",
+     ]
+diff --git a/chrome/browser/net/profile_network_context_service.cc b/chrome/browser/net/profile_network_context_service.cc
+index 62ff3787b22a1227e47ea85ad4cfbda8707e1534..4bebb076efad6eb9e3479627ef0dd7370059da04 100644
+--- a/chrome/browser/net/profile_network_context_service.cc
++++ b/chrome/browser/net/profile_network_context_service.cc
+@@ -101,6 +101,7 @@
+ #include "services/network/public/mojom/network_context.mojom.h"
+ #include "services/network/public/mojom/network_service.mojom.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/webview/regional_settings.h"
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "ash/constants/ash_features.h"
+@@ -713,6 +714,11 @@ void ProfileNetworkContextService::OnThirdPartyCookieBlockingChanged(
+ }
+ 
+ std::string ProfileNetworkContextService::ComputeAcceptLanguage() const {
++#if BUILDFLAG(IS_ANDROID)
++  if (auto language = blink::GetWebViewRegionalAcceptLanguage()) {
++    return *language;
++  }
++#endif
+   return ComputeAcceptLanguageFromPref(
+       content::ReduceAcceptLanguageUtils::GetLanguagesWithMaxCount(
+           profile_->IsOffTheRecord() ? language::GetIncognitoLanguageList(
+diff --git a/chrome/browser/net/system_network_context_manager.cc b/chrome/browser/net/system_network_context_manager.cc
+index 3cf48e449de1a9b82b3c033ff3494c44385a8bc3..21106ae4f5f11d947c84dbf93322de2aa77b142d 100644
+--- a/chrome/browser/net/system_network_context_manager.cc
++++ b/chrome/browser/net/system_network_context_manager.cc
+@@ -116,6 +116,10 @@
+ #include "chrome/common/request_header_integrity/request_header_integrity_url_loader_throttle.h"  // nogncheck crbug.com/40147906
+ #endif
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/android/fingerprint/fingerprint_startup.h"
++#endif
++
+ namespace {
+ 
+ // Enumeration of possible sandbox states. These values are persisted to logs,
+@@ -194,7 +198,7 @@ network::mojom::HttpAuthDynamicParamsPtr CreateHttpAuthDynamicParams(
+       auth_dynamic_params->patterns_allowed_to_use_all_schemes_for_proxies
+           .push_back(item.GetString());
+     }
+-  // TODO(crbug.com/568728957): Remove once all users are on M161+.
++    // TODO(crbug.com/568728957): Remove once all users are on M161+.
+   } else if (CHROME_VERSION_MAJOR < 161) {
+     auth_dynamic_params->patterns_allowed_to_use_all_schemes_for_proxies =
+         auth_dynamic_params->patterns_allowed_to_use_all_schemes;
+@@ -1197,6 +1201,9 @@ SystemNetworkContextManager::CreateNetworkContextParams() {
+   network_context_params->http_cache_enabled = false;
+ 
+   proxy_config_monitor_.AddToNetworkContextParams(network_context_params.get());
++#if BUILDFLAG(IS_ANDROID)
++  xpchromium::ConfigureNetwork(*network_context_params);
++#endif
+ 
+   return network_context_params;
+ }
+diff --git a/chrome/browser/renderer_preferences_util.cc b/chrome/browser/renderer_preferences_util.cc
+index 680a3df2d51cd0e748c2ca2549ad8196afd14dac..b99cd5600572331f06bc8c8a3d8614ff54e6712a 100644
+--- a/chrome/browser/renderer_preferences_util.cc
++++ b/chrome/browser/renderer_preferences_util.cc
+@@ -51,6 +51,10 @@
+ #include "ui/linux/linux_ui.h"
+ #endif
+ 
++#if BUILDFLAG(IS_ANDROID)
++#include "chrome/browser/android/fingerprint/fingerprint_startup.h"
++#endif
++
+ namespace {
+ 
+ // Parses a string |range| with a port range in the form "<min>-<max>".
+@@ -63,12 +67,14 @@ void ParsePortRange(const std::string& range,
+   *min_port = 0;
+   *max_port = 0;
+ 
+-  if (range.empty())
++  if (range.empty()) {
+     return;
++  }
+ 
+   size_t separator_index = range.find('-');
+-  if (separator_index == std::string::npos)
++  if (separator_index == std::string::npos) {
+     return;
++  }
+ 
+   std::string min_port_string, max_port_string;
+   base::TrimWhitespaceASCII(range.substr(0, separator_index), base::TRIM_ALL,
+@@ -93,8 +99,9 @@ void ParsePortRange(const std::string& range,
+ std::vector<std::string> GetLocalIpsAllowedUrls(
+     const base::ListValue& allowed_urls) {
+   std::vector<std::string> ret;
+-  for (const auto& url : allowed_urls)
++  for (const auto& url : allowed_urls) {
+     ret.push_back(url.GetString());
++  }
+   return ret;
+ }
+ 
+@@ -249,6 +256,9 @@ void UpdateFromSystemSettings(blink::RendererPreferences* prefs,
+         ConvertExplicitlyAllowedNetworkPortsPref(local_state);
+   }
+ 
++#if BUILDFLAG(IS_ANDROID)
++  xpchromium::UpdateRendererPreferences(*prefs);
++#endif
+   prefs->view_source_line_wrap_enabled =
+       pref_service->GetBoolean(prefs::kViewSourceLineWrappingEnabled);
+ 
+diff --git a/chrome/common/renderer_configuration.mojom b/chrome/common/renderer_configuration.mojom
+index b5631d2a8d915c9209ee9499cedad28b0b43e79a..9803ce8f01b3ab85452227e36916b0296eaf9f8c 100644
+--- a/chrome/common/renderer_configuration.mojom
++++ b/chrome/common/renderer_configuration.mojom
+@@ -92,6 +92,10 @@ interface ChromeOSListener {
+ 
+ // Configures the renderer.
+ interface RendererConfiguration {
++  // Apply Date/Intl and Worker regional state before committing a document.
++  [EnableIf=is_android]
++  SetRegionalIdentity(array<string> languages, string timezone) => (bool applied);
++
+   // Configures the renderer with settings that won't change.
+   // The |chromeos_listener| is only passed on Chrome OS when
+   // the merge session is still running - otherwise not set.
+diff --git a/chrome/renderer/chrome_content_renderer_client.cc b/chrome/renderer/chrome_content_renderer_client.cc
+index aa5782f9aff397f9de37c64b1e14a51ed34ccfec..01943581b5d5713d95493ca1f7df282a2526b147 100644
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -11,6 +11,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/base64.h"
+ #include "base/base_switches.h"
+ #include "base/check_op.h"
+ #include "base/command_line.h"
+@@ -159,6 +160,7 @@
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/features_generated.h"
+ #include "third_party/blink/public/common/tokens/tokens.h"
++#include "third_party/blink/public/common/webview/fingerprint_config.h"
+ #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-shared.h"
+ #include "third_party/blink/public/mojom/page/page_visibility_state.mojom.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -406,6 +408,18 @@ ChromeContentRendererClient::ChromeContentRendererClient(
+ ChromeContentRendererClient::~ChromeContentRendererClient() = default;
+ 
+ void ChromeContentRendererClient::RenderThreadStarted() {
++#if BUILDFLAG(IS_ANDROID)
++  const auto& fingerprint_command_line =
++      *base::CommandLine::ForCurrentProcess();
++  if (fingerprint_command_line.HasSwitch(blink::kWebViewFingerprintSwitch)) {
++    std::string json;
++    CHECK(base::Base64Decode(fingerprint_command_line.GetSwitchValueASCII(
++                                 blink::kWebViewFingerprintSwitch),
++                             &json));
++    CHECK(blink::ConfigureWebViewFingerprint(json).empty());
++  }
++  blink::FreezeWebViewFingerprint();
++#endif
+   RenderThread* thread = RenderThread::Get();
+ 
+   main_thread_profiler_->SetAuxUnwinderFactory(base::BindRepeating(
+@@ -480,8 +494,9 @@ void ChromeContentRendererClient::RenderThreadStarted() {
+ #endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+ 
+ #if BUILDFLAG(ENABLE_SPELLCHECK)
+-  if (!spellcheck_)
++  if (!spellcheck_) {
+     InitSpellCheck();
++  }
+ #endif
+ 
+   subresource_filter_ruleset_dealer_ =
+@@ -708,8 +723,9 @@ void ChromeContentRendererClient::RenderFrameCreated(
+ #endif
+   GoogleAccountsPrivateApiExtension::Create(render_frame);
+ 
+-  if (render_frame->IsMainFrame())
++  if (render_frame->IsMainFrame()) {
+     new webapps::WebPageMetadataAgent(render_frame);
++  }
+ 
+   const bool search_result_extractor_enabled =
+       render_frame->IsMainFrame() &&
+@@ -1349,8 +1365,9 @@ void ChromeContentRendererClient::WillSendRequest(
+   extensions::ExtensionsRendererClient::Get()->WillSendRequest(
+       frame, transition_type, upstream_url, target_url, site_for_cookies,
+       initiator_origin, new_url);
+-  if (!new_url->is_empty())
++  if (!new_url->is_empty()) {
+     return;
++  }
+ #endif
+ 
+   if (!target_url.ProtocolIs(chrome::kChromeSearchScheme)) {
+@@ -1536,8 +1553,9 @@ void ChromeContentRendererClient::
+     blink::WebRuntimeFeatures::EnableManualText(true);
+   }
+ 
+-  if (base::FeatureList::IsEnabled(subresource_filter::kAdTagging))
++  if (base::FeatureList::IsEnabled(subresource_filter::kAdTagging)) {
+     blink::WebRuntimeFeatures::EnableAdTagging(true);
++  }
+ 
+   auto state = base::FeatureList::GetStateIfOverridden(
+       features::kIncomingCallNotifications);
+@@ -1571,7 +1589,6 @@ void ChromeContentRendererClient::
+   }
+ }
+ 
+-
+ void ChromeContentRendererClient::
+     WillInitializeServiceWorkerContextOnWorkerThread() {
+   // This is called on the service worker thread.
+@@ -1651,8 +1668,9 @@ bool ChromeContentRendererClient::ShouldEnforceWebRTCRoutingPreferences() {
+ }
+ 
+ GURL ChromeContentRendererClient::OverrideFlashEmbedWithHTML(const GURL& url) {
+-  if (!url.is_valid())
++  if (!url.is_valid()) {
+     return GURL();
++  }
+ 
+   return FlashEmbedRewrite::RewriteFlashEmbedURL(url);
+ }
+@@ -1731,8 +1749,9 @@ void ChromeContentRendererClient::AppendContentSecurityPolicy(
+   // TODO(crbug.com/40792950): Lock down the CSP once style and script are no
+   // longer injected inline by `pdf::PluginResponseWriter`. That class may be a
+   // better place to define such CSP, or we may continue doing so here.
+-  if (pdf::IsPdfRenderer())
++  if (pdf::IsPdfRenderer()) {
+     return;
++  }
+ #endif  // BUILDFLAG(ENABLE_PDF)
+ 
+   DCHECK(csp);
+@@ -1742,8 +1761,9 @@ void ChromeContentRendererClient::AppendContentSecurityPolicy(
+   scoped_refptr<const extensions::Extension> extension =
+       extensions::RendererExtensionRegistry::Get()
+           ->GetRefCountedExtensionOrAppByURL(gurl);
+-  if (!extension)
++  if (!extension) {
+     return;
++  }
+ 
+   // Append a minimum CSP to ensure the extension can't relax the default
+   // applied CSP through means like Service Worker.
+diff --git a/chrome/renderer/chrome_render_thread_observer.cc b/chrome/renderer/chrome_render_thread_observer.cc
+index e8a78b8b848dd0548f564af82e69c6a92187574c..5b59095623d04c58b9a5645c219765c6da868754 100644
+--- a/chrome/renderer/chrome_render_thread_observer.cc
++++ b/chrome/renderer/chrome_render_thread_observer.cc
+@@ -46,8 +46,10 @@
+ #include "net/base/net_errors.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/webview/regional_settings.h"
+ #include "third_party/blink/public/platform/web_string.h"
+ #include "third_party/blink/public/platform/web_url.h"
++#include "third_party/blink/public/platform/webview_regional_settings.h"
+ #include "third_party/blink/public/web/web_document.h"
+ #include "third_party/blink/public/web/web_frame.h"
+ #include "third_party/blink/public/web/web_security_policy.h"
+@@ -79,8 +81,9 @@ namespace {
+ #if BUILDFLAG(IS_CHROMEOS)
+ scoped_refptr<base::SequencedTaskRunner> GetCallbackGroupTaskRunner() {
+   content::ChildThread* child_thread = content::ChildThread::Get();
+-  if (child_thread)
++  if (child_thread) {
+     return child_thread->GetIOTaskRunner();
++  }
+ 
+   // This will happen when running via tests.
+   return base::SequencedTaskRunner::GetCurrentDefault();
+@@ -195,8 +198,9 @@ void ChromeRenderThreadObserver::SetInitialConfiguration(
+         content_settings_manager,
+     mojo::PendingRemote<chrome::mojom::BoundSessionRequestThrottledHandler>
+         bound_session_request_throttled_handler) {
+-  if (content_settings_manager)
++  if (content_settings_manager) {
+     content_settings_manager_.Bind(std::move(content_settings_manager));
++  }
+   process_state::SetIsIncognitoProcess(is_incognito_process);
+ #if BUILDFLAG(IS_CHROMEOS)
+   if (chromeos_listener_receiver) {
+@@ -215,6 +219,22 @@ void ChromeRenderThreadObserver::SetInitialConfiguration(
+ #endif
+ }
+ 
++#if BUILDFLAG(IS_ANDROID)
++void ChromeRenderThreadObserver::SetRegionalIdentity(
++    const std::vector<std::string>& languages,
++    const std::string& time_zone,
++    SetRegionalIdentityCallback callback) {
++  const bool applied =
++      blink::WebViewApplyRegionalSettings(
++          blink::WebString::FromUtf8(time_zone),
++          blink::WebString::FromUtf8(languages.empty() ? ""
++                                                       : languages.front())) &&
++      blink::SetWebViewRegionalSettings({languages, time_zone});
++  std::move(callback).Run(applied);
++}
++
++#endif
++
+ void ChromeRenderThreadObserver::SetConfiguration(
+     chrome::mojom::DynamicParamsPtr params) {
+ #if BUILDFLAG(ENABLE_REQUEST_HEADER_INTEGRITY) && !BUILDFLAG(IS_ANDROID)
+diff --git a/chrome/renderer/chrome_render_thread_observer.h b/chrome/renderer/chrome_render_thread_observer.h
+index 11ffcdbb58cd8ca1615de9aebb3f5afb1de480e6..ef0baa549e6d36dd0a9082596d37e4cc52cb3a85 100644
+--- a/chrome/renderer/chrome_render_thread_observer.h
++++ b/chrome/renderer/chrome_render_thread_observer.h
+@@ -6,6 +6,8 @@
+ #define CHROME_RENDERER_CHROME_RENDER_THREAD_OBSERVER_H_
+ 
+ #include <memory>
++#include <string>
++#include <vector>
+ 
+ #include "base/memory/ref_counted.h"
+ #include "base/synchronization/lock.h"
+@@ -115,8 +117,9 @@ class ChromeRenderThreadObserver : public content::RenderThreadObserver,
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+   content_settings::mojom::ContentSettingsManager* content_settings_manager() {
+-    if (content_settings_manager_)
++    if (content_settings_manager_) {
+       return content_settings_manager_.get();
++    }
+     return nullptr;
+   }
+ 
+@@ -137,6 +140,11 @@ class ChromeRenderThreadObserver : public content::RenderThreadObserver,
+       mojo::PendingRemote<chrome::mojom::BoundSessionRequestThrottledHandler>
+           bound_session_request_throttled_handler) override;
+   void SetConfiguration(chrome::mojom::DynamicParamsPtr params) override;
++#if BUILDFLAG(IS_ANDROID)
++  void SetRegionalIdentity(const std::vector<std::string>& languages,
++                           const std::string& time_zone,
++                           SetRegionalIdentityCallback callback) override;
++#endif
+   void SetConfigurationOnProcessLockUpdate(
+       chrome::mojom::StaticParamsPtr params) override;
+   void OnRendererConfigurationAssociatedRequest(
+diff --git a/net/base/identity_request_policy.cc b/net/base/identity_request_policy.cc
+index f245103e28bc7d65def546b87d14f04e6d7a7784..538b2b4378058f2c30754fa36d24c9c19b1fbe2c 100644
+--- a/net/base/identity_request_policy.cc
++++ b/net/base/identity_request_policy.cc
+@@ -13,7 +13,18 @@ namespace net {
+ void ApplyIdentityRequestHeaders(
+     HttpRequestHeaders& headers,
+     int dnt,
+-    const std::optional<std::string>& accept_language) {
++    const std::optional<std::string>& accept_language,
++    const std::optional<std::string>& requested_with,
++    const std::optional<std::string>& user_agent) {
++  if (requested_with) {
++    headers.RemoveHeader("X-Requested-With");
++    if (!requested_with->empty()) {
++      headers.SetHeader("X-Requested-With", *requested_with);
++    }
++  }
++  if (user_agent) {
++    headers.SetHeader(HttpRequestHeaders::kUserAgent, *user_agent);
++  }
+   if (dnt == 0 || dnt == 1) {
+     headers.SetHeader("DNT", dnt ? "1" : "0");
+   }
+diff --git a/net/base/identity_request_policy.h b/net/base/identity_request_policy.h
+index fd565b6ca9ce9e33b6305c2d1c7ea1d991a4c7e1..84059b8054f2d7e91c12d891ec9a78d86d9b66e0 100644
+--- a/net/base/identity_request_policy.h
++++ b/net/base/identity_request_policy.h
+@@ -16,7 +16,9 @@ class HttpRequestHeaders;
+ NET_EXPORT void ApplyIdentityRequestHeaders(
+     HttpRequestHeaders& headers,
+     int dnt,
+-    const std::optional<std::string>& accept_language);
++    const std::optional<std::string>& accept_language,
++    const std::optional<std::string>& requested_with = std::nullopt,
++    const std::optional<std::string>& user_agent = std::nullopt);
+ NET_EXPORT bool IdentityAllowsUrl(const GURL& url,
+                                   bool block_local,
+                                   base::span<const uint16_t> blocked_ports);
+diff --git a/services/network/network_context.h b/services/network/network_context.h
+index 3b03b2045b697fc821687bdf380ea14dc9ab87c5..4c9f706c88e418d24bc3455f9c9fbcfd6afb9a55 100644
+--- a/services/network/network_context.h
++++ b/services/network/network_context.h
+@@ -221,6 +221,12 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) NetworkContext
+   bool IsIdentityUrlAllowed(const GURL& url) const;
+   bool IsIdentityAddressAllowed(const net::IPAddress& address) const;
+   std::optional<std::string> IdentityAcceptLanguage() const;
++  std::optional<std::string> IdentityRequestedWith() const {
++    return params_ ? params_->identity_requested_with : std::nullopt;
++  }
++  std::optional<std::string> IdentityUserAgent() const {
++    return params_ ? params_->identity_user_agent : std::nullopt;
++  }
+   int IdentityDoNotTrack() const {
+     return params_ ? params_->identity_do_not_track : -1;
+   }
+diff --git a/services/network/network_service_network_delegate.cc b/services/network/network_service_network_delegate.cc
+index aa19e63366fad5d6b5b592891ebfa219b388a0b9..c513b0ac1055fa160c99637d1ca647bd0af032db 100644
+--- a/services/network/network_service_network_delegate.cc
++++ b/services/network/network_service_network_delegate.cc
+@@ -109,7 +109,12 @@ int NetworkServiceNetworkDelegate::OnBeforeURLRequest(
+   net::HttpRequestHeaders identity_headers;
+   net::ApplyIdentityRequestHeaders(identity_headers,
+                                    network_context_->IdentityDoNotTrack(),
+-                                   network_context_->IdentityAcceptLanguage());
++                                   network_context_->IdentityAcceptLanguage(),
++                                   network_context_->IdentityRequestedWith(),
++                                   network_context_->IdentityUserAgent());
++  if (network_context_->IdentityRequestedWith()) {
++    request->RemoveRequestHeaderByName("X-Requested-With");
++  }
+   for (net::HttpRequestHeaders::Iterator it(identity_headers); it.GetNext();) {
+     request->SetExtraRequestHeaderByName(it.name(), it.value(), true);
+   }
+diff --git a/services/network/public/mojom/network_context.mojom b/services/network/public/mojom/network_context.mojom
+index d1b884d7a9ed3284f6207c229a5c8da095776dcd..bd5f0b3a30220e09b186cecab6753ba521f469d3 100644
+--- a/services/network/public/mojom/network_context.mojom
++++ b/services/network/public/mojom/network_context.mojom
+@@ -361,6 +361,9 @@ struct NetworkContextParams {
+   ProxyAuthentication? proxy_authentication;
+   bool identity_block_local = false;
+   bool identity_force_accept_language = false;
++  // null preserves native headers; empty Requested-With removes that header.
++  string? identity_requested_with;
++  string? identity_user_agent;
+   array<uint16> identity_blocked_ports;
+   // -1 preserves native DNT policy; 0/1 explicitly sends that value.
+   int32 identity_do_not_track = -1;
+diff --git a/webview_custom/tests/network_session_identity_test.cc b/webview_custom/tests/network_session_identity_test.cc
+index 477c90be7d345fa9e06614bfcdf697529dee3160..716c89a39baca9e716c223c45aeea51f477aa523 100644
+--- a/webview_custom/tests/network_session_identity_test.cc
++++ b/webview_custom/tests/network_session_identity_test.cc
+@@ -134,6 +134,27 @@ TEST_F(NetworkSessionIdentityTest,
+   EXPECT_EQ(headers.GetHeader("DNT"), "0");
+   EXPECT_EQ(headers.GetHeader("Accept-Language"), "zh-CN,zh;q=0.9");
+ }
++TEST_F(NetworkSessionIdentityTest,
++       BrowserHeadersReplaceRemoveAndKeepNativeDefaults) {
++  HttpRequestHeaders headers;
++  headers.SetHeader("x-requested-with", "page-supplied");
++  headers.SetHeader("User-Agent", "native-UA");
++  headers.SetHeader("Authorization", "must-be-preserved");
++  ApplyIdentityRequestHeaders(headers, -1, std::nullopt);
++  EXPECT_EQ(headers.GetHeader("X-Requested-With"), "page-supplied");
++  EXPECT_EQ(headers.GetHeader("User-Agent"), "native-UA");
++  ApplyIdentityRequestHeaders(headers, -1, std::nullopt,
++                              std::string("test.browser"),
++                              std::string("configured-UA"));
++  EXPECT_EQ(headers.GetHeader("X-Requested-With"), "test.browser");
++  EXPECT_EQ(headers.GetHeader("User-Agent"), "configured-UA");
++  EXPECT_EQ(headers.GetHeader("Authorization"), "must-be-preserved");
++  ApplyIdentityRequestHeaders(headers, -1, std::nullopt, std::string(""));
++  EXPECT_FALSE(headers.HasHeader("X-Requested-With"));
++  EXPECT_EQ(headers.GetHeader("User-Agent"), "configured-UA");
++  ApplyIdentityRequestHeaders(headers, -1, std::nullopt);
++  EXPECT_FALSE(headers.HasHeader("X-Requested-With"));
++}
+ TEST_F(NetworkSessionIdentityTest, NativeAndRestrictedUrls) {
+   const uint16_t ports[] = {22, 3389};
+   for (const char* url :

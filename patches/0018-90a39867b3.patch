@@ -1,0 +1,170 @@
+From 90a39867b3e2a4037133cbdc3aa65277002adb51 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Sun, 18 Oct 2026 03:00:19 +0800
+Subject: [PATCH] Apply startup identity to Chromium UA Client Hints
+
+Use the shared browser/Worker/native HTTP metadata entry point for automatic brands and versions, explicit metadata overrides, and matching mobile form factors. Preserve Chromium branding, upstream GREASE ordering and low entropy restrictions. Keep native behavior when configuration is disabled.
+
+Exercise the production wrapper and override methods with ASan/UBSan, including native defaults, configured UA versions, explicit fields, both entropy paths and blank native metadata. The native brand generator/platform boundary is adapted in the host regression; Android uses the actual implementation.
+
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 3dd327ba755adddc962e01b6fb8923477bf0d9a2..f0f0b92f14f37ea09d812b768b519aa6539f7124 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -30,6 +30,7 @@
+ #include "net/http/http_util.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++#include "third_party/blink/public/common/user_agent/user_agent_property_overrides.h"
+ #include "third_party/blink/public/common/webview/property_overrides.h"
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -637,7 +638,8 @@ std::string GetPlatformForUAMetadata() {
+ #endif
+ }
+ 
+-blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
++namespace {
++blink::UserAgentMetadata GetNativeUserAgentMetadata(bool only_low_entropy_ch) {
+   blink::UserAgentMetadata metadata;
+ 
+   // Low entropy client hints.
+@@ -676,6 +678,39 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   return metadata;
+ }
+ 
++// Share the native metadata path used by page/Worker APIs and HTTP hints.
++// Preserve this embedder's Chromium/Chrome branding and native GREASE order.
++void ApplyFingerprintUserAgentMetadata(blink::UserAgentMetadata& metadata,
++                                       bool only_low_entropy_ch) {
++  const blink::WebViewPropertyOverrides config;
++  if (!config.enabled()) {
++    return;
++  }
++  const std::string version = config.UserAgentVersion().value_or(
++      std::string(version_info::GetVersionNumber()));
++  const std::string major = version.substr(0, version.find('.'));
++  metadata.brand_version_list = GetUserAgentBrandList(
++      major, version, blink::UserAgentBrandVersionType::kMajorVersion,
++      std::nullopt);
++  if (!only_low_entropy_ch) {
++    metadata.full_version = version;
++    metadata.brand_full_version_list = GetUserAgentBrandList(
++        major, version, blink::UserAgentBrandVersionType::kFullVersion,
++        std::nullopt);
++  }
++  blink::ApplyUserAgentPropertyOverrides(metadata, only_low_entropy_ch);
++  if (!only_low_entropy_ch) {
++    metadata.form_factors = GetFormFactorsClientHint(metadata, metadata.mobile);
++  }
++}
++}  // namespace
++
++blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
++  auto metadata = GetNativeUserAgentMetadata(only_low_entropy_ch);
++  ApplyFingerprintUserAgentMetadata(metadata, only_low_entropy_ch);
++  return metadata;
++}
++
+ std::vector<std::string> GetFormFactorsClientHint(
+     const blink::UserAgentMetadata& metadata,
+     bool is_mobile) {
+diff --git a/webview_custom/test_browser_metadata.py b/webview_custom/test_browser_metadata.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ffb7101521bff934d14c597545c57ad584a68b5a
+--- /dev/null
++++ b/webview_custom/test_browser_metadata.py
+@@ -0,0 +1,93 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++"""Exercise Chromium's production metadata wrapper and override policy."""
++from pathlib import Path
++import subprocess
++from test_support import definition, host_build
++root = Path(__file__).resolve().parents[1]
++code = (root / "webview_custom/tests/auto_brands_test.cc").read_text()
++code = code.replace("std::string platform =", "std::vector<std::string> form_factors;\n  std::string platform =")
++code = code.replace("PRODUCTION_METADATA", definition(root,
++    "third_party/blink/common/user_agent/user_agent_metadata.cc",
++    "void ApplyUserAgentPropertyOverrides("))
++helper = definition(root, "components/embedder_support/user_agent_utils.cc",
++    "void ApplyFingerprintUserAgentMetadata(")
++wrapper = definition(root, "components/embedder_support/user_agent_utils.cc",
++    "blink::UserAgentMetadata GetUserAgentMetadata(")
++adapters = r"""
++namespace embedder_support {
++bool blank_native = false;
++blink::UserAgentMetadata GetNativeUserAgentMetadata(bool low) {
++  blink::UserAgentMetadata result;
++  result.mobile = false;
++  if (!blank_native) {
++    result.brand_version_list = {{"Native", "158"}};
++    if (!low) { result.full_version = "native"; result.model = "native-model"; }
++  }
++  return result;
++}
++blink::UserAgentBrandList GetUserAgentBrandList(const std::string& major,
++    const std::string& full, blink::UserAgentBrandVersionType kind,
++    std::optional<blink::UserAgentBrandVersion>) {
++  assert(major == full.substr(0, full.find('.')));
++  return {{"GREASE", "99"}, {"Chromium",
++    kind == blink::UserAgentBrandVersionType::kMajorVersion ? major : full}};
++}
++std::vector<std::string> GetFormFactorsClientHint(
++    const blink::UserAgentMetadata&, bool mobile) {
++  return {mobile ? "Mobile" : "Desktop"};
++}
++HELPER
++WRAPPER
++}
++""".replace("HELPER", helper).replace("WRAPPER", wrapper)
++start = code.index("namespace android_webview {")
++end = code.index("\nvoid Set(", start)
++code = code[:start] + adapters + code[end:]
++code = code[:code.index("int main() {")] + r"""
++int main() {
++  using embedder_support::GetUserAgentMetadata;
++  auto native = GetUserAgentMetadata(false);
++  assert(native.full_version == "native" && native.model == "native-model");
++  assert(native.brand_version_list[0].brand == "Native");
++  Set("chromium.enable", "1");
++  auto generated = GetUserAgentMetadata(false);
++  assert(generated.full_version == "158.0.8109.0");
++  assert(generated.brand_version_list[1].version == "158");
++  assert(generated.brand_full_version_list[1].version == "158.0.8109.0");
++  assert(generated.brand_version_list[1].brand == "Chromium");
++  assert(generated.model == "native-model");
++  Set("chromium.navigator.useragent", "Mozilla/5.0 Chrome/157.0.8000.2 Mobile Safari/537.36");
++  Set("chromium.navigator.userAgentMeta.mobile", "1");
++  auto custom = GetUserAgentMetadata(false);
++  assert(custom.full_version == "157.0.8000.2");
++  assert(custom.brand_version_list[1].version == "157");
++  assert(custom.mobile && custom.form_factors[0] == "Mobile");
++  for (bool blank : {false, true}) {
++    embedder_support::blank_native = blank;
++    auto low = GetUserAgentMetadata(true);
++    assert(low.brand_version_list[1].version == "157" && low.mobile);
++    assert(low.full_version.empty() && low.brand_full_version_list.empty());
++    assert(low.model.empty() && low.architecture.empty() && low.form_factors.empty());
++    auto high = GetUserAgentMetadata(false);
++    assert(high.full_version == "157.0.8000.2" && high.mobile);
++  }
++  Set("chromium.navigator.userAgentMeta.brands", "Custom,42");
++  Set("chromium.navigator.userAgentMeta.fullVersionList", "Custom,42.1.2.3");
++  Set("chromium.navigator.userAgentMeta.architecture", "arm");
++  Set("chromium.navigator.userAgentMeta.bitness", "64");
++  auto explicit_values = GetUserAgentMetadata(false);
++  assert(explicit_values.brand_version_list.size() == 1);
++  assert(explicit_values.brand_version_list[0].brand == "Custom");
++  assert(explicit_values.brand_full_version_list[0].version == "42.1.2.3");
++  assert(explicit_values.architecture == "arm" && explicit_values.bitness == "64");
++  auto low = GetUserAgentMetadata(true);
++  assert(low.brand_version_list[0].brand == "Custom");
++  assert(low.architecture.empty() && low.bitness.empty() && low.brand_full_version_list.empty());
++}
++"""
++with host_build(root, code) as executable:
++    subprocess.run([str(executable)], check=True)
++print("PASS Chromium metadata wrapper: native defaults, UA versions, explicit fields, low entropy, form factors (ASan/UBSan; brand/platform boundary adapters)")

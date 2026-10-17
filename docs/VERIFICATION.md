@@ -1,5 +1,21 @@
 # 构建验证记录
 
+## 独立 Android Chromium 测试浏览器（2026-10-18）
+
+- 源码提交：`90a39867b3e2a4037133cbdc3aa65277002adb51`；源码树：`ec05e4d1de587a2a68f5bc402acfe27b502284cc`。只追加自定义提交，官方基线保持不变。
+- 完整目标 `chrome_public_apk` 于 2026-10-18T03:00:51+08:00 构建完成；构建前后源码工作区干净。
+- 复用已有文件解析、代理监视、IP 地区/定位协调器；新增 Chrome 启动、renderer 快照、导航确认、系统及 Profile 网络上下文、WebRTC/WebTransport 和存储权限接入。
+- Chromium UA Client Hints 生产入口及 WebView 自动 brands 的 ASan/UBSan 回归通过（品牌生成器与平台边界使用适配器；Android APK 链接实际实现）。
+- 44 项原生 HTTP/SOCKS5/认证/传输/请求头测试通过，新增 UA 与 Requested-With 原生替换、删除和默认保留测试；配置/文件、像素/音频、IP 地区解析及 SimpleURLLoader/Mojo 定位测试通过。
+- Chrome 适配器、core、net impl、renderer、共享 startup_identity、WebView browser、network service 的 GN 头文件依赖检查通过；13 个文件新增 include 检查无违规；Chrome 适配翻译单元独立编译通过。
+- 18 个补丁从官方基线逐个在临时 Git 索引重放，每一步源码树与原始提交完全一致。
+- 安装脚本通过 bash 语法检查；示例通过 JSON 解析；检查页通过 JavaScript 语法检查。本地主机 HTTP 实测页面及头回显成功、其他路径返回 404，服务只返回指定诊断头，不返回 Authorization/Cookie。
+- APK：`Chromium-158.0.8109.0-arm64-identity-rk14.apk`，513537599 字节；SHA-256：`13131b03d4e3789719a04d01018d02983950c902b23b1a7eb9975d958c5cff58`。
+- 包名 `org.chromium.chrome`、版本 158.0.8109.0、minSdk 29、targetSdk 36、arm64 ABI、MANAGE_EXTERNAL_STORAGE/legacy 存储声明、ZIP 完整性、16 KiB ZIP/ELF 对齐、编译功能标记及签名前后 payload CRC/大小一致性均通过验证。
+- RK14 v2/v3 签名通过；证书 SHA-256：`cf2ab3818595c4eda08cec72bbe39bc377a30b764a3eebde52536eae01808525`。私钥只在 Mac 临时解包并使用，已清理；服务器只接收签名 APK 与公开验证信息。
+- 使用说明见 [CHROMIUM_BROWSER.md](CHROMIUM_BROWSER.md)，默认原生网络的测试配置见 [fingerprint.browser.json](../examples/fingerprint.browser.json)。
+- 未执行真机安装或页面/Worker/代理出口验证。设备检查页和 USB 回显入口已经提供；本机 HTTP 测试不替代 Android 运行时验收。已交付的 WebView APK 仍对应后文记录的源码版本。
+
 ## 统一身份升级（2026-10-18）
 
 - 源码提交：`cfc574e8e4f882047107c3fded8ec3e0f5a6f70a`；源码树：`17bac118bfaba9ef6df99c883ea39fd7564d1da5`。

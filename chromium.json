@@ -3,7 +3,7 @@
   "chromium_version": "158.0.8109.0",
   "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
   "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
-  "source_head": "cfc574e8e4f882047107c3fded8ec3e0f5a6f70a",
+  "source_head": "90a39867b3e2a4037133cbdc3aa65277002adb51",
   "target": {
     "os": "android",
     "cpu": "arm64",
@@ -106,7 +106,27 @@
       "source_commit": "cfc574e8e4f882047107c3fded8ec3e0f5a6f70a",
       "subject": "Declare native identity test header dependencies",
       "sha256": "656414dba3d2e94a5db29eb665b261fb8e15a6f0a6b2c58158e5c8b713a761c0"
+    },
+    {
+      "file": "patches/0017-8f75f237b4.patch",
+      "source_commit": "8f75f237b4c9d4370af2c67d4a8dd8f3c166a61a",
+      "subject": "Enable the standalone Android Chromium fingerprint test browser",
+      "sha256": "51084acdeb97ff979a1931a47fa43b758c7f2088b5453aef90cb192a67c921c0"
+    },
+    {
+      "file": "patches/0018-90a39867b3.patch",
+      "source_commit": "90a39867b3e2a4037133cbdc3aa65277002adb51",
+      "subject": "Apply startup identity to Chromium UA Client Hints",
+      "sha256": "81c4656720bc51db85608e5b2028db7e2e1e37a7f904bcf92b467ef2ccc53401"
     }
   ],
-  "source_tree": "17bac118bfaba9ef6df99c883ea39fd7564d1da5"
+  "source_tree": "ec05e4d1de587a2a68f5bc402acfe27b502284cc",
+  "browser_target": {
+    "gn_target": "chrome_public_apk",
+    "os": "android",
+    "cpu": "arm64",
+    "min_sdk": 29,
+    "package_name": "org.chromium.chrome",
+    "output": "apks/ChromePublic.apk"
+  }
 }
