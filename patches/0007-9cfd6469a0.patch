@@ -1,0 +1,93 @@
+From 9cfd6469a0f59972b2480e2c2e40a174001a9287 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 23:14:23 +0800
+Subject: [PATCH] Support checked iterators and enforce configured HTTP client
+ hint brands
+
+
+diff --git a/base/android/webview_property_overrides.h b/base/android/webview_property_overrides.h
+index 6a67dfb5ac88b703998252f9453d20e0c4743734..99aa6903ed4b1afb3642c59ccba657d1a3295a6e 100644
+--- a/base/android/webview_property_overrides.h
++++ b/base/android/webview_property_overrides.h
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <charconv>
+ #include <cmath>
++#include <memory>
+ #include <optional>
+ #include <string>
+ #include <string_view>
+@@ -63,9 +64,10 @@ inline std::optional<int> GetInt(const char* name, int min, int max) {
+   }
+   int value;
+   std::string_view view(*text);
+-  auto result = std::from_chars(view.begin(), view.end(), value);
+-  if (result.ec != std::errc() || result.ptr != view.end() || value < min ||
+-      value > max) {
++  auto result = std::from_chars(std::to_address(view.begin()),
++                                std::to_address(view.end()), value);
++  if (result.ec != std::errc() || result.ptr != std::to_address(view.end()) ||
++      value < min || value > max) {
+     return std::nullopt;
+   }
+   return value;
+@@ -80,8 +82,9 @@ inline std::optional<double> GetDouble(const char* name,
+   }
+   std::string_view view(*text);
+   double value;
+-  auto result = std::from_chars(view.begin(), view.end(), value);
+-  if (result.ec != std::errc() || result.ptr != view.end() ||
++  auto result = std::from_chars(std::to_address(view.begin()),
++                                std::to_address(view.end()), value);
++  if (result.ec != std::errc() || result.ptr != std::to_address(view.end()) ||
+       !std::isfinite(value) || value < min || value > max) {
+     return std::nullopt;
+   }
+@@ -182,9 +185,10 @@ inline bool IsIPv4(std::string_view value) {
+     size_t dot = value.find('.');
+     auto part = value.substr(0, dot);
+     unsigned number;
+-    auto r = std::from_chars(part.begin(), part.end(), number);
+-    if (part.empty() || r.ec != std::errc() || r.ptr != part.end() ||
+-        number > 255) {
++    auto r = std::from_chars(std::to_address(part.begin()),
++                             std::to_address(part.end()), number);
++    if (part.empty() || r.ec != std::errc() ||
++        r.ptr != std::to_address(part.end()) || number > 255) {
+       return false;
+     }
+     if (i == 3) {
+diff --git a/third_party/blink/common/user_agent/user_agent_metadata.cc b/third_party/blink/common/user_agent/user_agent_metadata.cc
+index f2dc67f52f2df39c00afe2c58c16c90f1a4f1f24..f042ce6b19f0c8227a65a2aa01c56c81b051c623 100644
+--- a/third_party/blink/common/user_agent/user_agent_metadata.cc
++++ b/third_party/blink/common/user_agent/user_agent_metadata.cc
+@@ -38,7 +38,12 @@ UserAgentBrandVersion::UserAgentBrandVersion(const std::string& ua_brand,
+ namespace {
+ 
+ std::string SerializeBrandVersionList(
+-    const blink::UserAgentBrandList& ua_brand_version_list) {
++    const blink::UserAgentBrandList& original, const char* property) {
++  blink::UserAgentBrandList configured;
++  for (const auto& [brand, version] : base::android::webview::Brands(property)) {
++    configured.emplace_back(brand, version);
++  }
++  const auto& ua_brand_version_list = configured.empty() ? original : configured;
+   const net::structured_headers::List brand_version_header = base::ToVector(
+       ua_brand_version_list, [](const UserAgentBrandVersion& brand_version) {
+         net::structured_headers::Parameters params;
+@@ -60,11 +65,13 @@ std::string SerializeBrandVersionList(
+ }  // namespace
+ 
+ std::string UserAgentMetadata::SerializeBrandFullVersionList() const {
+-  return SerializeBrandVersionList(brand_full_version_list);
++  return SerializeBrandVersionList(brand_full_version_list,
++      "chromium.navigator.userAgentMeta.fullVersionList");
+ }
+ 
+ std::string UserAgentMetadata::SerializeBrandMajorVersionList() const {
+-  return SerializeBrandVersionList(brand_version_list);
++  return SerializeBrandVersionList(brand_version_list,
++      "chromium.navigator.userAgentMeta.brands");
+ }
+ 
+ std::string UserAgentMetadata::SerializeFormFactors() const {

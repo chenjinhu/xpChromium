@@ -1,0 +1,286 @@
+From 74e42f41721e8da146877e9ca3acc298b527cad8 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 21:17:06 +0800
+Subject: [PATCH] Port custom Window bindings and Canvas fillRect noise to
+ Chromium 158
+
+
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index 4399d8aa86c9916cc0068cd38cb45979e2c9ab03..d2a52ab870e69d05d82b4f99c38a2c9d099ae7d6 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -36,9 +36,9 @@
+ ] interface Window : WindowProperties {
+     // the current browsing context
+     // FIXME: The spec uses the WindowProxy type for this and many other attributes.
+-    [LegacyUnforgeable, CrossOrigin, CachedAccessor=kWindowProxy, Measure] readonly attribute Window window;
++    [Replaceable, CrossOrigin, CachedAccessor=kWindowProxy, Measure] readonly attribute Window window;
+     [Replaceable, CrossOrigin, CachedAccessor=kWindowProxy, Measure] readonly attribute Window self;
+-    [LegacyUnforgeable, CachedAccessor=kWindowDocument] readonly attribute Document document;
++    [Replaceable, CachedAccessor=kWindowDocument] readonly attribute Document document;
+     attribute DOMString name;
+     [PutForwards=href, LegacyUnforgeable, CrossOrigin=(Getter,Setter), Measure] readonly attribute Location location;
+     [CallWith=ScriptState] readonly attribute CustomElementRegistry customElements;
+diff --git a/third_party/blink/renderer/modules/canvas/BUILD.gn b/third_party/blink/renderer/modules/canvas/BUILD.gn
+index 1d29be27176bf2473088b9c5d0e406b6765bfaf3..8c4dde282bcd5a45d7ca5142e8a51f8688c537ee 100644
+--- a/third_party/blink/renderer/modules/canvas/BUILD.gn
++++ b/third_party/blink/renderer/modules/canvas/BUILD.gn
+@@ -9,6 +9,7 @@ blink_modules_sources("canvas") {
+   sources = [
+     "canvas2d/base_rendering_context_2d.cc",
+     "canvas2d/base_rendering_context_2d.h",
++    "canvas2d/base_rendering_context_random.h",
+     "canvas2d/cached_color.h",
+     "canvas2d/canvas_2d_recorder_context.cc",
+     "canvas2d/canvas_2d_recorder_context.h",
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..25b4619ce8137c5bdb7ad4fb54333fdf3d74924d
+--- /dev/null
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h
+@@ -0,0 +1,19 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_CANVAS_CANVAS2D_BASE_RENDERING_CONTEXT_RANDOM_H_
++#define THIRD_PARTY_BLINK_RENDERER_MODULES_CANVAS_CANVAS2D_BASE_RENDERING_CONTEXT_RANDOM_H_
++
++#include "base/rand_util.h"
++
++namespace blink {
++
++// Independent integer offset for each coordinate/dimension of a fillRect call.
++inline int GetCanvasRandomInt() {
++  return base::RandInt(-1, 1);
++}
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_MODULES_CANVAS_CANVAS2D_BASE_RENDERING_CONTEXT_RANDOM_H_
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+index 28baea3ae6a96b8d429b21e1f6273b1e0b415295..157341cc3792eff8959761b5172f937174f305f2 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+@@ -77,6 +77,7 @@
+ #include "third_party/blink/renderer/core/style/filter_operations.h"
+ #include "third_party/blink/renderer/core/typed_arrays/array_buffer_view_helpers.h"
+ #include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
++#include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/cached_color.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_filter.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_gradient.h"
+@@ -1755,8 +1756,17 @@ void Canvas2DRecorderContext::fillRect(double x,
+         GPUFallbackToCPUScenario::kLargePatternDrawnToGPU);
+   }
+ 
+-  // clamp to float to avoid float cast overflow when used as SkScalar
++  // Normalize signed dimensions before applying the supplied fillRect noise.
+   CanvasRenderingContext::AdjustRectForCanvas(x, y, width, height);
++  if (RuntimeEnabledFeatures::CanvasFillRectNoiseEnabled() && width != 0 &&
++      height != 0) {
++    x += GetCanvasRandomInt();
++    y += GetCanvasRandomInt();
++    // Keep tiny rectangles non-negative and zero-size draws unchanged.
++    width = std::max(0.0, width + GetCanvasRandomInt());
++    height = std::max(0.0, height + GetCanvasRandomInt());
++  }
++  // Clamp to float to avoid float cast overflow when used as SkScalar.
+   gfx::RectF rect(ClampTo<float>(x), ClampTo<float>(y), ClampTo<float>(width),
+                   ClampTo<float>(height));
+   Draw<OverdrawOp::kNone>(
+diff --git a/third_party/blink/renderer/platform/runtime_enabled_features.json5 b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+index dd7705e097235d970bd231a776e5693ac92e039f..5587834068f67d457d9a81132304aa25725f3fd1 100644
+--- a/third_party/blink/renderer/platform/runtime_enabled_features.json5
++++ b/third_party/blink/renderer/platform/runtime_enabled_features.json5
+@@ -1101,6 +1101,11 @@
+       origin_trial_feature_name: "HTMLInCanvas",
+       status: "stable",
+     },
++    {
++      // Custom fillRect geometry noise; disable to restore upstream rendering.
++      name: "CanvasFillRectNoise",
++      status: "stable",
++    },
+     {
+       name: "CanvasFloatingPoint",
+       status: "stable",
+diff --git a/webview_custom/README.md b/webview_custom/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb9b1b70739e8140235cccef7b427e604f2d5cb5
+--- /dev/null
++++ b/webview_custom/README.md
+@@ -0,0 +1,33 @@
++# Chromium WebView 自定义补丁
++
++- 上游基线：`51b3c21991199bc9531e7d296056dd9351554c0c`，版本 `158.0.8109.0`。
++- 本地基线标签：`webview-base-158.0.8109.0`；开发分支：`webview-custom`。
++- 输入文件：`Chromium修改.zip`，SHA-256 `13cb9871d4b8e1a62b858870721bd88c130657c2969b4c7c6c10601faeefa510`。
++- 输入源码与官方 Chromium `122.0.6261.128` 基本匹配。仅移植自定义差异，保留 158 的接口和上游修复。
++
++## WebView 修改
++
++1. `Window.window`、`Window.document` 从 `LegacyUnforgeable` 改为 `Replaceable`，保留跨域限制与缓存属性。
++2. `fillRect` 为 x、y、width、height 分别生成独立的 `[-1, 1]` 整数偏移。原包缺少随机函数头文件，经用户授权使用 Chromium `base::RandInt` 补齐。
++3. 保留原始无效参数处理；零宽高不加噪，负尺寸先按上游逻辑归一化，扰动后的宽高下限为 0。
++4. `CanvasFillRectNoise` 默认开启，可用 `--disable-blink-features=CanvasFillRectNoise` 恢复上游 Canvas 绘制。此修改影响 HTML Canvas 和 OffscreenCanvas 的共用绘制入口；每次绘制可能得到不同图像。
++
++`navigator`、`screen` 在输入包中没有新的功能实现，当前版本的配置属性保持原样。输入包没有 WebGL 随机化或无限 debugger 处理源码，这两项未实现。
++
++## 桌面 Chrome 修改
++
++另一个提交保留输入包的六个图标资源、缺少 Google API key 的提示文案、关闭该提示栏，以及 `--start-url` 参数日志。原实现只输出日志，不会打开 URL。这些 Chrome 修改不参与 `system_webview_64_apk` 目标。
++
++纯注释、未使用 include、旧版 V8 接口差异和下载提示文案漂移不移植。
++
++## 验证
++
++`smoke.html` 可在使用此 WebView 的 Android 测试应用中加载，检查对象替换、跨域限制、Canvas 扰动范围、零尺寸和非法参数。正常模式应显示全部 PASS。关闭噪声开关后加载 `smoke.html?noise=off` 检查上游绘制恢复。没有连接 Android 设备时，不将编译或 APK 签名检查视为运行测试通过。
++
++增量编译时使用：
++
++```sh
++CHROMIUM_WEBVIEW_BUILD_ONLY=1 /home/qiled/chromium-android-latest/run-webview-build.sh
++```
++
++不要在自定义分支直接运行默认同步流程；它会更新上游源码。使用 `git ours-log` 查看自定义提交，`git ours-diff` 查看相对基线的修改。
+diff --git a/webview_custom/smoke.html b/webview_custom/smoke.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2dd92f7916d3de01b9100741afa4328662208ed
+--- /dev/null
++++ b/webview_custom/smoke.html
+@@ -0,0 +1,134 @@
++<!doctype html>
++<!-- Copyright 2026 The Chromium Authors
++     Use of this source code is governed by a BSD-style license that can be
++     found in the LICENSE file. -->
++<meta charset="utf-8">
++<title>Custom WebView patch smoke test</title>
++<style>body { font: 16px monospace; padding: 20px; } pre { white-space: pre-wrap; }</style>
++<h1>Custom WebView patch smoke test</h1>
++<pre id="output">Running...</pre>
++<script>
++'use strict';
++(async () => {
++  const results = [];
++  const output = document.getElementById('output');
++  const assert = (condition, message) => {
++    if (!condition) throw new Error(message);
++  };
++  async function test(name, run) {
++    try {
++      await run();
++      results.push({name, pass: true});
++    } catch (error) {
++      results.push({name, pass: false, error: String(error)});
++    }
++    output.textContent = results.map(r =>
++      `${r.pass ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`).join('\n');
++  }
++
++  await test('Window/document replacement and other configurable objects', () => {
++    const frame = document.createElement('iframe');
++    document.body.appendChild(frame);
++    try {
++      const w = frame.contentWindow;
++      const realDocument = w.document;
++      const windowProxy = new Proxy(w, {});
++      const documentProxy = new Proxy(realDocument, {});
++      w.window = windowProxy;
++      w.document = documentProxy;
++      assert(w.window === windowProxy, 'window assignment was ignored');
++      assert(w.document === documentProxy, 'document assignment was ignored');
++      for (const property of ['navigator', 'screen']) {
++        const replacement = new Proxy(w[property], {});
++        Object.defineProperty(w, property, {value: replacement, configurable: true});
++        assert(w[property] === replacement, property + ' could not be configured');
++      }
++      assert(!Reflect.defineProperty(w, 'location', {value: {}}),
++             'location must remain protected');
++    } finally {
++      frame.remove();
++    }
++  });
++
++  await test('Cross-origin document remains protected', async () => {
++    const frame = document.createElement('iframe');
++    frame.sandbox = 'allow-scripts';
++    frame.srcdoc = '<!doctype html><title>opaque origin</title>';
++    const loaded = new Promise(resolve => frame.onload = resolve);
++    document.body.appendChild(frame);
++    try {
++      await loaded;
++      let denied = false;
++      try { void frame.contentWindow.document; }
++      catch (error) { denied = error.name === 'SecurityError'; }
++      assert(denied, 'cross-origin document read was allowed');
++      denied = false;
++      try { frame.contentWindow.document = {}; }
++      catch (error) { denied = error.name === 'SecurityError'; }
++      assert(denied, 'cross-origin document write was allowed');
++    } finally {
++      frame.remove();
++    }
++  });
++
++  const noiseOff = new URLSearchParams(location.search).get('noise') === 'off';
++  function bounds(context, rectangle) {
++    context.clearRect(0, 0, 50, 50);
++    context.fillRect(...rectangle);
++    const pixels = context.getImageData(0, 0, 50, 50).data;
++    let x0 = 50, y0 = 50, x1 = -1, y1 = -1;
++    for (let y = 0; y < 50; ++y) {
++      for (let x = 0; x < 50; ++x) {
++        if (pixels[(y * 50 + x) * 4 + 3]) {
++          x0 = Math.min(x0, x); y0 = Math.min(y0, y);
++          x1 = Math.max(x1, x); y1 = Math.max(y1, y);
++        }
++      }
++    }
++    return x1 < 0 ? null : [x0, y0, x1 - x0 + 1, y1 - y0 + 1];
++  }
++  function checkCanvas(canvas) {
++    const context = canvas.getContext('2d', {willReadFrequently: true});
++    assert(context, '2D context unavailable');
++    context.fillStyle = 'rgb(255,0,0)';
++    for (const rect of [[10,10,20,20], [30,30,-20,-20]]) {
++      const variants = new Set();
++      for (let i = 0; i < 64; ++i) {
++        const b = bounds(context, rect);
++        assert(b, 'normal rectangle was empty');
++        if (noiseOff) {
++          assert(b.join(',') === '10,10,20,20', 'disabled flag changed drawing');
++        } else {
++          assert(b[0] >= 9 && b[0] <= 11 && b[1] >= 9 && b[1] <= 11,
++                 'coordinate offset outside [-1,1]: ' + b);
++          assert(b[2] >= 19 && b[2] <= 21 && b[3] >= 19 && b[3] <= 21,
++                 'dimension offset outside [-1,1]: ' + b);
++        }
++        variants.add(b.join(','));
++      }
++      assert(noiseOff || variants.size > 1, 'no drawing variation observed in 64 calls');
++    }
++    for (const rect of [[10,10,0,20], [10,10,20,0], [0,0,0,0],
++                        [NaN,0,20,20], [0,Infinity,20,20]]) {
++      assert(bounds(context, rect) === null, 'invalid/empty input produced pixels');
++    }
++    // Tiny dimensions must never become a negative-size drawing rectangle.
++    for (let i = 0; i < 32; ++i) {
++      const b = bounds(context, [10,10,0.25,0.25]);
++      assert(b === null || (b[0] >= 9 && b[1] >= 9 && b[2] <= 2 && b[3] <= 2),
++             'tiny rectangle expanded unexpectedly: ' + b);
++    }
++  }
++  await test('HTML Canvas noise, signed/zero/tiny dimensions and invalid values', () => {
++    const canvas = document.createElement('canvas');
++    canvas.width = canvas.height = 50;
++    checkCanvas(canvas);
++  });
++  await test('OffscreenCanvas uses the same noise policy', () => {
++    assert(typeof OffscreenCanvas === 'function', 'OffscreenCanvas unavailable');
++    checkCanvas(new OffscreenCanvas(50, 50));
++  });
++  globalThis.webviewPatchResults = results;
++  document.title = results.every(r => r.pass) ? 'PASS: WebView patch' : 'FAIL: WebView patch';
++})();
++</script>

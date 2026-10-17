@@ -1,0 +1,62 @@
+From 36a8e09522cd023aafb660ce8cce5f2a28a7abc8 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 23:13:07 +0800
+Subject: [PATCH] Use bounded numeric parsing for Android property overrides
+
+
+diff --git a/base/android/webview_property_overrides.h b/base/android/webview_property_overrides.h
+index 01f8b7b70806aa0280bd380a4447c42eca40aab0..6a67dfb5ac88b703998252f9453d20e0c4743734 100644
+--- a/base/android/webview_property_overrides.h
++++ b/base/android/webview_property_overrides.h
+@@ -8,7 +8,6 @@
+ #include <algorithm>
+ #include <charconv>
+ #include <cmath>
+-#include <cstdlib>
+ #include <optional>
+ #include <string>
+ #include <string_view>
+@@ -63,10 +62,10 @@ inline std::optional<int> GetInt(const char* name, int min, int max) {
+     return std::nullopt;
+   }
+   int value;
+-  auto result =
+-      std::from_chars(text->data(), text->data() + text->size(), value);
+-  if (result.ec != std::errc() || result.ptr != text->data() + text->size() ||
+-      value < min || value > max) {
++  std::string_view view(*text);
++  auto result = std::from_chars(view.begin(), view.end(), value);
++  if (result.ec != std::errc() || result.ptr != view.end() || value < min ||
++      value > max) {
+     return std::nullopt;
+   }
+   return value;
+@@ -79,10 +78,11 @@ inline std::optional<double> GetDouble(const char* name,
+   if (!text || text->find_first_of(" \t\r\n") != std::string::npos) {
+     return std::nullopt;
+   }
+-  char* end = nullptr;
+-  double value = std::strtod(text->c_str(), &end);
+-  if (end != text->c_str() + text->size() || !std::isfinite(value) ||
+-      value < min || value > max) {
++  std::string_view view(*text);
++  double value;
++  auto result = std::from_chars(view.begin(), view.end(), value);
++  if (result.ec != std::errc() || result.ptr != view.end() ||
++      !std::isfinite(value) || value < min || value > max) {
+     return std::nullopt;
+   }
+   return value;
+@@ -182,9 +182,9 @@ inline bool IsIPv4(std::string_view value) {
+     size_t dot = value.find('.');
+     auto part = value.substr(0, dot);
+     unsigned number;
+-    auto r = std::from_chars(part.data(), part.data() + part.size(), number);
+-    if (part.empty() || r.ec != std::errc() ||
+-        r.ptr != part.data() + part.size() || number > 255) {
++    auto r = std::from_chars(part.begin(), part.end(), number);
++    if (part.empty() || r.ec != std::errc() || r.ptr != part.end() ||
++        number > 255) {
+       return false;
+     }
+     if (i == 3) {

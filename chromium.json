@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "chromium_version": "158.0.8109.0",
+  "upstream_url": "https://chromium.googlesource.com/chromium/src.git",
+  "base_commit": "51b3c21991199bc9531e7d296056dd9351554c0c",
+  "source_head": "02b7cf0fc73439a0eaaacd262cba3307ce0d02e2",
+  "target": {
+    "os": "android",
+    "cpu": "arm64",
+    "min_sdk": 29,
+    "package_name": "com.android.webview"
+  },
+  "patches": [
+    {
+      "file": "patches/0001-74e42f4172.patch",
+      "source_commit": "74e42f41721e8da146877e9ca3acc298b527cad8",
+      "subject": "Port custom Window bindings and Canvas fillRect noise to Chromium 158",
+      "sha256": "7fdc94a1b2585fd4eac62a0398b58daac77ce7cde3cf4799890b23576facf806"
+    },
+    {
+      "file": "patches/0002-a901d32023.patch",
+      "source_commit": "a901d32023f5e973ef4abfb2cf9f09945f03dfa2",
+      "subject": "Port supplied Chromium desktop branding and startup customizations",
+      "sha256": "0906098fe6cb4fb08e77e0ae66ef2eb468bcd13212c0b8087fdf0c97b94c065b"
+    },
+    {
+      "file": "patches/0003-1586193d45.patch",
+      "source_commit": "1586193d4587f24379bec1f3365c98e4325eda85",
+      "subject": "Fix patch compatibility, navigator replacement and Canvas noise overhead",
+      "sha256": "9724b0aaf7451e9371681f5dd3c0411951e23740aa28c79d8e9d3710e2161691"
+    },
+    {
+      "file": "patches/0004-f269a7d7d7.patch",
+      "source_commit": "f269a7d7d7f347af8b501aa551a593728237e12f",
+      "subject": "Fix Window setter use counter compatibility",
+      "sha256": "0c1111847bf4baea549445aefdbfc3f4131f5bbf2d355aed363b657aceaa1f34"
+    },
+    {
+      "file": "patches/0005-a190e05d04.patch",
+      "source_commit": "a190e05d04cb7ba482d90b50d722b2ccfdb842b1",
+      "subject": "Port reviewed Android property overrides from Chromium 130 to 158",
+      "sha256": "14a5df92b825debe65b4c71c56e828f65f965c2ab7181e2a9edb024b9b0e8583"
+    },
+    {
+      "file": "patches/0006-36a8e09522.patch",
+      "source_commit": "36a8e09522cd023aafb660ce8cce5f2a28a7abc8",
+      "subject": "Use bounded numeric parsing for Android property overrides",
+      "sha256": "ec1222b02c381a800a2475c8ec925d873c69e9f7536b51126f6317fb505184a0"
+    },
+    {
+      "file": "patches/0007-9cfd6469a0.patch",
+      "source_commit": "9cfd6469a0f59972b2480e2c2e40a174001a9287",
+      "subject": "Support checked iterators and enforce configured HTTP client hint brands",
+      "sha256": "80eaa545f2f66c9a82a8547d6765d5c7263ef57ec46a6330dce5e5f64e0133aa"
+    },
+    {
+      "file": "patches/0008-c6e92812b1.patch",
+      "source_commit": "c6e92812b1c3422ff8abc82f0f0b15ce80f6208b",
+      "subject": "Preserve native values when overrides are disabled or invalid",
+      "sha256": "9f83204d3018075613cab9dfa633993d333b9eb5930d91aafa038cf1daac0528"
+    },
+    {
+      "file": "patches/0009-02b7cf0fc7.patch",
+      "source_commit": "02b7cf0fc73439a0eaaacd262cba3307ce0d02e2",
+      "subject": "Fix WebView override isolation, metadata validation and pixel export",
+      "sha256": "ce12c58ff103d0894cd2fac65d69f740bc78477c9e3213c79720d18b9e2673ee"
+    }
+  ],
+  "source_tree": "2b8375977d6175cc2f70f00a4db68a737b9330a1"
+}

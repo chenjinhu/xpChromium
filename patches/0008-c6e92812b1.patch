@@ -1,0 +1,148 @@
+From c6e92812b1c3422ff8abc82f0f0b15ce80f6208b Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 23:17:22 +0800
+Subject: [PATCH] Preserve native values when overrides are disabled or invalid
+
+
+diff --git a/base/android/webview_property_overrides.h b/base/android/webview_property_overrides.h
+index 99aa6903ed4b1afb3642c59ccba657d1a3295a6e..8a7cc6ac7f75927bb8b6e492bf0a3c51baec0b0c 100644
+--- a/base/android/webview_property_overrides.h
++++ b/base/android/webview_property_overrides.h
+@@ -165,7 +165,8 @@ inline std::vector<std::pair<std::string, std::string>> Brands(
+     size_t comma = part.find(',');
+     if (comma == std::string_view::npos || comma == 0 ||
+         part.find(',', comma + 1) != std::string_view::npos ||
+-        !ValidHeaderValue(part)) {
++        !std::all_of(part.begin(), part.end(),
++                     [](unsigned char c) { return c >= 32 && c <= 126; })) {
+       return {};
+     }
+     result.emplace_back(part.substr(0, comma), part.substr(comma + 1));
+@@ -215,6 +216,9 @@ inline std::optional<std::string> IceAddress(std::string_view type,
+ }
+ 
+ inline std::string IceCandidate(std::string_view input) {
++  if (!Enabled()) {
++    return std::string(input);
++  }
+   std::vector<std::string> fields;
+   std::string_view rest = input;
+   while (!rest.empty()) {
+@@ -229,15 +233,21 @@ inline std::string IceCandidate(std::string_view input) {
+     return std::string(input);
+   }
+   auto address = IceAddress(fields[7]);
++  bool changed = false;
+   if (address && IsIPv4(fields[4])) {
++    changed |= fields[4] != *address;
+     fields[4] = *address;
+   }
+   auto related = IceAddress(fields[7], true);
+   for (size_t i = 8; i + 1 < fields.size(); ++i) {
+     if (fields[i] == "raddr" && related && IsIPv4(fields[i + 1])) {
++      changed |= fields[i + 1] != *related;
+       fields[i + 1] = *related;
+     }
+   }
++  if (!changed) {
++    return std::string(input);
++  }
+   std::string output;
+   for (const auto& field : fields) {
+     if (!output.empty()) {
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index 2c77b678f7716a7faa2e3d7beef26294c2b13f25..7375a4cf518887b47f1ece8f81b1c1fc805195b6 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -46,10 +46,10 @@ NavigatorUAData::NavigatorUAData(ExecutionContext* context)
+ 
+ void NavigatorUAData::SetBrandVersionList(
+     const UserAgentBrandList& brand_version_list) {
+-  brand_set_.clear();
+   auto configured =
+       base::android::webview::Brands("chromium.navigator.userAgentMeta.brands");
+   if (!configured.empty()) {
++    brand_set_.clear();
+     for (const auto& [brand, version] : configured) {
+       brand_set_.push_back(
+           MakeBrandVersion(String::FromUtf8(brand), String::FromUtf8(version)));
+@@ -62,10 +62,10 @@ void NavigatorUAData::SetBrandVersionList(
+ 
+ void NavigatorUAData::SetFullVersionList(
+     const UserAgentBrandList& full_version_list) {
+-  full_version_list_.clear();
+   auto configured = base::android::webview::Brands(
+       "chromium.navigator.userAgentMeta.fullVersionList");
+   if (!configured.empty()) {
++    full_version_list_.clear();
+     for (const auto& [brand, version] : configured) {
+       full_version_list_.push_back(
+           MakeBrandVersion(String::FromUtf8(brand), String::FromUtf8(version)));
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc b/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
+index aa4e077724550483ceb5e08c9e7ccd457373f9ac..0b112b3eaf13e3d8eb4bbad18d767c5c5ed774a6 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
+@@ -87,8 +87,13 @@ RTCIceCandidate::RTCIceCandidate(RTCIceCandidatePlatform* platform_candidate)
+     : platform_candidate_(platform_candidate) {}
+ 
+ String RTCIceCandidate::candidate() const {
+-  return String::FromUtf8(base::android::webview::IceCandidate(
+-      platform_candidate_->Candidate().Utf8()));
++  const String& original = platform_candidate_->Candidate();
++  if (!base::android::webview::Enabled()) {
++    return original;
++  }
++  std::string input = original.Utf8();
++  std::string output = base::android::webview::IceCandidate(input);
++  return output == input ? original : String::FromUtf8(output);
+ }
+ 
+ String RTCIceCandidate::sdpMid() const {
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc b/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc
+index 4d38cf81536e5a2295160a843afc032c15ea68f3..f6f335c56999ea761800b1a3621bd5eea09cc881 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc
+@@ -87,6 +87,9 @@ void RTCSessionDescription::setType(std::optional<V8RTCSdpType> type) {
+ }
+ 
+ String RTCSessionDescription::sdp() const {
++  if (base::android::webview::GetBool("chromium.webrtc.sdp_redact") != true) {
++    return platform_session_description_->Sdp();
++  }
+   return String::FromUtf8(base::android::webview::RedactSdp(
+       platform_session_description_->Sdp().Utf8()));
+ }
+diff --git a/webview_custom/PROPERTY_PATCHES.md b/webview_custom/PROPERTY_PATCHES.md
+index 5e38ce69135fea106bfad35f6565a7de1fa675ca..8c1f0bfe3caa8d31e1c95763723cb69f6c07a4f3 100644
+--- a/webview_custom/PROPERTY_PATCHES.md
++++ b/webview_custom/PROPERTY_PATCHES.md
+@@ -40,7 +40,7 @@ setprop chromium.enable 0
+ | navigator.battery.chargingTime / dischargingTime | 有限秒数 0..1e15 |
+ | navigator.battery.level | 有限数 0..1 |
+ | navigator.bluetooth | false/0 时 getter 返回 null；true 不强制打开原本不可用的 API |
+-| navigator.connection.type | bluetooth/cellular/ethernet/mixed/none/other/unknown/wifi/wimax，按 158 IDL 枚举校验 |
++| navigator.connection.type | bluetooth/cellular/ethernet/none/other/unknown/wifi/wimax，按 158 IDL 枚举校验 |
+ | navigator.connection.effectiveType | slow-2g/2g/3g/4g，按 IDL 校验 |
+ | navigator.connection.downlinkMax / downlink | 有限数 0..1e9（Mbps） |
+ | navigator.connection.rtt | 整数 0..2147483647（毫秒） |
+diff --git a/webview_custom/test_properties.py b/webview_custom/test_properties.py
+index bc7606013f7f60429e02d8c3b51bb1042bc7d1e5..15f5fd59babe41f456e53def4b9e4b41fad5fe41 100644
+--- a/webview_custom/test_properties.py
++++ b/webview_custom/test_properties.py
+@@ -65,7 +65,7 @@ int main() {
+   set("chromium.navigator.useragent3","test"); assert(UserAgent()=="Mozilla/5.0 test");
+   set("chromium.navigator.useragent2","\nbad"); assert(!UserAgent());
+   set("brands","A,158&B,1"); assert(Brands("brands").size()==2);
+-  for (const char* invalid : {"broken","A,1&","A,1&B","A,1,2",",1"}) {
++  for (const char* invalid : {"broken","A,1&","A,1&B","A,1,2",",1","\xC3\xA9,1"}) {
+     set("brands",invalid); assert(Brands("brands").empty());
+   }
+   assert(IsIPv4("192.0.2.7")); assert(!IsIPv4("999.0.0.1"));
+@@ -86,6 +86,7 @@ int main() {
+   assert(std::isinf(data[3]));
+   std::array<float,4> silence={}; assert(!PerturbAudio(std::span(silence),1));
+   set("chromium.enable","0"); assert(!GetInt("number",0,100));
++  assert(IceCandidate("candidate:3 1 udp 1 10.0.0.1 5 typ host ")=="candidate:3 1 udp 1 10.0.0.1 5 typ host ");
+   assert(RedactSdp(sdp)==sdp);
+ }
+ ''')

@@ -1,0 +1,1662 @@
+From a190e05d04cb7ba482d90b50d722b2ccfdb842b1 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 23:11:57 +0800
+Subject: [PATCH] Port reviewed Android property overrides from Chromium 130 to
+ 158
+
+
+diff --git a/android_webview/browser/aw_client_hints_controller_delegate.cc b/android_webview/browser/aw_client_hints_controller_delegate.cc
+index 5573808bd162b1cefa8200112807d57afd626aec..801946eb535d1d7561b3ada8ac11a96f1d49e9fe 100644
+--- a/android_webview/browser/aw_client_hints_controller_delegate.cc
++++ b/android_webview/browser/aw_client_hints_controller_delegate.cc
+@@ -20,6 +20,7 @@
+ #include "services/network/public/cpp/network_quality_tracker.h"
+ #include "third_party/blink/public/common/client_hints/enabled_client_hints.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++#include "third_party/blink/public/common/user_agent/user_agent_property_overrides.h"
+ #include "url/gurl.h"
+ #include "url/origin.h"
+ 
+@@ -63,6 +64,7 @@ AwClientHintsControllerDelegate::GetUserAgentMetadataOverrideBrand(
+             blink::UserAgentBrandVersionType::kFullVersion);
+   }
+ 
++  blink::ApplyUserAgentPropertyOverrides(metadata, only_low_entropy_ch);
+   return metadata;
+ }
+ 
+diff --git a/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc b/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc
+index 6c14686dc2264c02f94321c0ba3a83ff519ec8ea..e781f2219c8e9b5267578a23c290717b0efe8353 100644
+--- a/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc
++++ b/android_webview/browser/network_service/aw_proxying_url_loader_factory.cc
+@@ -32,6 +32,7 @@
+ #include "android_webview/common/aw_switches.h"
+ #include "android_webview/common/url_constants.h"
+ #include "base/android/apk_info.h"
++#include "base/android/webview_property_overrides.h"
+ #include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+@@ -731,6 +732,9 @@ void InterceptedRequest::ContinueAfterDynamicHeadersAvailable(
+     SendErrorAndCompleteImmediately(net::ERR_UNEXPECTED);
+     return;
+   }
++  network::HttpRequestHeadersUpdateParams property_headers;
++  base::android::webview::ApplyRequestHeaderOverrides(property_headers);
++  headers_update_params_expected->MergeFromInChain(property_headers);
+   // Apply the updates to the request, computing the inverse updates.
+   custom_headers_inverse_ =
+       headers_update_params_expected->ApplyAndReturnInverse(
+@@ -1168,6 +1172,16 @@ AwProxyingURLLoaderFactory::~AwProxyingURLLoaderFactory() = default;
+ void AwProxyingURLLoaderFactory::SetRequestedWithHeader(
+     const network::ResourceRequest& request,
+     net::HttpRequestHeaders& cors_exempt_headers) {
++  if (auto value = base::android::webview::RequestedWith()) {
++    const std::string key = content::GetCorsExemptRequestedWithHeaderName();
++    if (value->empty()) {
++      cors_exempt_headers.RemoveHeader(key);
++    } else {
++      cors_exempt_headers.SetHeader(key, *value);
++    }
++    return;
++  }
++
+   // We send the application's package name in the X-Requested-With header for
+   // compatibility with previous WebView versions. This should not be visible to
+   // shouldInterceptRequest. It should also not trigger CORS preflight if
+diff --git a/android_webview/browser/prefetch/aw_prefetch_manager.cc b/android_webview/browser/prefetch/aw_prefetch_manager.cc
+index f0dde8948725bc89a9e3d1b79a912d59033b5ad1..884026256c26982a0980b402913df69e7ba3fb0c 100644
+--- a/android_webview/browser/prefetch/aw_prefetch_manager.cc
++++ b/android_webview/browser/prefetch/aw_prefetch_manager.cc
+@@ -19,6 +19,7 @@
+ #include "base/android/apk_info.h"
+ #include "base/android/jni_string.h"
+ #include "base/android/scoped_java_ref.h"
++#include "base/android/webview_property_overrides.h"
+ #include "base/check_is_test.h"
+ #include "base/no_destructor.h"
+ #include "base/notimplemented.h"
+@@ -167,6 +168,7 @@ network::HttpRequestHeadersUpdateParams GetAwPrefetchHeadersOnNonUIThread(
+   // application via the AndroidX Profile.setCustomHeaders() API
+   // (AwOriginMatchedHeader).
+ 
++  base::android::webview::ApplyRequestHeaderOverrides(headers_update_params);
+   return headers_update_params;
+ }
+ 
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index 9feaf5f8e639b33b871fdafe9e5d3e4c6b240761..9f5b71f74200dde0b4192a722e865548cd3f5e71 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -260,6 +260,7 @@ component("base") {
+     "allocator/dispatcher/subsystem.h",
+     "allocator/dispatcher/tls.cc",
+     "allocator/dispatcher/tls.h",
++    "android/webview_property_overrides.h",
+     "at_exit.cc",
+     "at_exit.h",
+     "atomic_ref_count.h",
+diff --git a/base/android/webview_property_overrides.h b/base/android/webview_property_overrides.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..01f8b7b70806aa0280bd380a4447c42eca40aab0
+--- /dev/null
++++ b/base/android/webview_property_overrides.h
+@@ -0,0 +1,300 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_ANDROID_WEBVIEW_PROPERTY_OVERRIDES_H_
++#define BASE_ANDROID_WEBVIEW_PROPERTY_OVERRIDES_H_
++
++#include <algorithm>
++#include <charconv>
++#include <cmath>
++#include <cstdlib>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "build/build_config.h"
++
++#if BUILDFLAG(IS_ANDROID)
++#include <sys/system_properties.h>
++#endif
++
++namespace base::android::webview {
++
++// Do not cache values: a controller may change a property while WebView runs.
++// An absent property is distinct from an explicitly empty X-Requested-With.
++inline std::optional<std::string> RawProperty(const char* name) {
++#if BUILDFLAG(IS_ANDROID)
++  const prop_info* info = __system_property_find(name);
++  if (info) {
++    std::string value;
++    __system_property_read_callback(
++        info,
++        [](void* cookie, const char*, const char* text, uint32_t) {
++          *static_cast<std::string*>(cookie) = text;
++        },
++        &value);
++    return value;
++  }
++#endif
++  return std::nullopt;
++}
++
++inline bool Enabled() {
++  return RawProperty("chromium.enable") == "1";
++}
++
++inline std::optional<std::string> GetString(const char* name) {
++  if (!Enabled()) {
++    return std::nullopt;
++  }
++  auto value = RawProperty(name);
++  if (!value || value->empty() || *value == "-") {
++    return std::nullopt;
++  }
++  return value;
++}
++
++inline std::optional<int> GetInt(const char* name, int min, int max) {
++  auto text = GetString(name);
++  if (!text) {
++    return std::nullopt;
++  }
++  int value;
++  auto result =
++      std::from_chars(text->data(), text->data() + text->size(), value);
++  if (result.ec != std::errc() || result.ptr != text->data() + text->size() ||
++      value < min || value > max) {
++    return std::nullopt;
++  }
++  return value;
++}
++
++inline std::optional<double> GetDouble(const char* name,
++                                       double min,
++                                       double max) {
++  auto text = GetString(name);
++  if (!text || text->find_first_of(" \t\r\n") != std::string::npos) {
++    return std::nullopt;
++  }
++  char* end = nullptr;
++  double value = std::strtod(text->c_str(), &end);
++  if (end != text->c_str() + text->size() || !std::isfinite(value) ||
++      value < min || value > max) {
++    return std::nullopt;
++  }
++  return value;
++}
++
++inline std::optional<bool> GetBool(const char* name) {
++  auto text = GetString(name);
++  if (text == "1" || text == "true") {
++    return true;
++  }
++  if (text == "0" || text == "false") {
++    return false;
++  }
++  return std::nullopt;
++}
++
++inline bool ValidHeaderValue(std::string_view value) {
++  return std::all_of(value.begin(), value.end(), [](unsigned char c) {
++    return c == '\t' || (c >= 32 && c != 127);
++  });
++}
++
++inline std::optional<std::string> UserAgent() {
++  auto first = GetString("chromium.navigator.useragent");
++  if (!first) {
++    return std::nullopt;
++  }
++  for (const char* key :
++       {"chromium.navigator.useragent2", "chromium.navigator.useragent3"}) {
++    auto next = RawProperty(key);
++    if (next && *next != "-") {
++      first->append(*next);
++    }
++  }
++  return ValidHeaderValue(*first) ? first : std::nullopt;
++}
++
++// nullopt: retain Chromium policy; empty: remove; otherwise: replace.
++inline std::optional<std::string> RequestedWith() {
++  if (!Enabled()) {
++    return std::nullopt;
++  }
++  auto value = RawProperty("chromium.config.x_requested_with");
++  if (!value || *value == "-" || !ValidHeaderValue(*value)) {
++    return std::nullopt;
++  }
++  return value;
++}
++
++// Works with HttpRequestHeadersUpdateParams; keep HTTP dependencies out of
++// base.
++template <typename HeaderUpdates>
++inline void ApplyRequestHeaderOverrides(HeaderUpdates& updates) {
++  if (auto value = RequestedWith()) {
++    updates.RemoveHeader("X-Requested-With");
++    if (!value->empty()) {
++      updates.SetCorsExemptHeader("X-Requested-With", *value);
++    }
++  }
++  if (auto value = UserAgent()) {
++    updates.RemoveHeader("User-Agent");
++    updates.SetHeader("User-Agent", *value);
++  }
++}
++
++inline std::vector<std::pair<std::string, std::string>> Brands(
++    const char* name) {
++  auto text = GetString(name);
++  std::vector<std::pair<std::string, std::string>> result;
++  if (!text) {
++    return result;
++  }
++  std::string_view remaining(*text);
++  while (!remaining.empty()) {
++    size_t separator = remaining.find('&');
++    auto part = remaining.substr(0, separator);
++    size_t comma = part.find(',');
++    if (comma == std::string_view::npos || comma == 0 ||
++        part.find(',', comma + 1) != std::string_view::npos ||
++        !ValidHeaderValue(part)) {
++      return {};
++    }
++    result.emplace_back(part.substr(0, comma), part.substr(comma + 1));
++    if (separator == std::string_view::npos) {
++      break;
++    }
++    remaining.remove_prefix(separator + 1);
++    if (remaining.empty()) {
++      return {};
++    }
++  }
++  return result;
++}
++
++inline bool IsIPv4(std::string_view value) {
++  for (int i = 0; i < 4; ++i) {
++    size_t dot = value.find('.');
++    auto part = value.substr(0, dot);
++    unsigned number;
++    auto r = std::from_chars(part.data(), part.data() + part.size(), number);
++    if (part.empty() || r.ec != std::errc() ||
++        r.ptr != part.data() + part.size() || number > 255) {
++      return false;
++    }
++    if (i == 3) {
++      return dot == std::string_view::npos;
++    }
++    if (dot == std::string_view::npos) {
++      return false;
++    }
++    value.remove_prefix(dot + 1);
++  }
++  return false;
++}
++
++inline std::optional<std::string> IceAddress(std::string_view type,
++                                             bool related = false) {
++  const char* key = type == "host" || (type == "srflx" && related)
++                        ? "chromium.webrtc.private_ip"
++                        : "chromium.webrtc.public_ip";
++  if (type != "host" && type != "srflx" && type != "relay") {
++    return std::nullopt;
++  }
++  auto ip = GetString(key);
++  return ip && IsIPv4(*ip) ? ip : std::nullopt;
++}
++
++inline std::string IceCandidate(std::string_view input) {
++  std::vector<std::string> fields;
++  std::string_view rest = input;
++  while (!rest.empty()) {
++    auto pos = rest.find(' ');
++    fields.emplace_back(rest.substr(0, pos));
++    if (pos == std::string_view::npos) {
++      break;
++    }
++    rest.remove_prefix(pos + 1);
++  }
++  if (fields.size() < 8 || fields[6] != "typ") {
++    return std::string(input);
++  }
++  auto address = IceAddress(fields[7]);
++  if (address && IsIPv4(fields[4])) {
++    fields[4] = *address;
++  }
++  auto related = IceAddress(fields[7], true);
++  for (size_t i = 8; i + 1 < fields.size(); ++i) {
++    if (fields[i] == "raddr" && related && IsIPv4(fields[i + 1])) {
++      fields[i + 1] = *related;
++    }
++  }
++  std::string output;
++  for (const auto& field : fields) {
++    if (!output.empty()) {
++      output += ' ';
++    }
++    output += field;
++  }
++  return output;
++}
++
++// Deliberately separate from the master switch: stripping candidates can
++// prevent a copied SDP from establishing a real peer connection.
++inline std::string RedactSdp(std::string_view input) {
++  if (GetBool("chromium.webrtc.sdp_redact") != true) {
++    return std::string(input);
++  }
++  std::string output;
++  while (!input.empty()) {
++    auto end = input.find('\n');
++    auto line = input.substr(0, end);
++    bool cr = !line.empty() && line.back() == '\r';
++    if (cr) {
++      line.remove_suffix(1);
++    }
++    if (!line.starts_with("a=candidate:")) {
++      if (line.starts_with("c=IN IP4 ") && IsIPv4(line.substr(9))) {
++        output += "c=IN IP4 0.0.0.0";
++      } else {
++        output += line;
++      }
++      if (cr) {
++        output += '\r';
++      }
++      if (end != std::string_view::npos) {
++        output += '\n';
++      }
++    }
++    if (end == std::string_view::npos) {
++      break;
++    }
++    input.remove_prefix(end + 1);
++  }
++  return output;
++}
++
++template <typename Samples>
++inline bool PerturbAudio(Samples samples, double seed) {
++  if (!std::isfinite(seed) || seed == 0) {
++    return false;
++  }
++  float delta = static_cast<float>(std::clamp(seed * 0.123, -0.00001, 0.00001));
++  bool changed = false;
++  for (float& sample : samples) {
++    if (sample != 0 && std::isfinite(sample)) {
++      sample += delta;
++      changed = true;
++    }
++  }
++  return changed;
++}
++
++}  // namespace base::android::webview
++
++#endif  // BASE_ANDROID_WEBVIEW_PROPERTY_OVERRIDES_H_
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index bf4a8960a0d6cd2268b5a497edcdd761a1b67360..ad2d41758ec8a6f6260deb80d4d57e42b2b54a1f 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -13,6 +13,7 @@
+ #include <vector>
+ 
+ #include "base/android/device_info.h"
++#include "base/android/webview_property_overrides.h"
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/feature_list.h"
+@@ -483,6 +484,10 @@ std::optional<std::string> GetUserAgentFromCommandLine() {
+ }
+ 
+ std::string GetUserAgent() {
++  if (auto value = base::android::webview::UserAgent()) {
++    return *value;
++  }
++
+   std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
+   if (custom_ua.has_value()) {
+     return custom_ua.value();
+@@ -887,6 +892,10 @@ std::string GetAndroidDesktopCpuArchitecture() {
+ 
+ std::string BuildUserAgentFromOSAndProduct(const std::string& os_info,
+                                            const std::string& product) {
++  if (auto value = base::android::webview::UserAgent()) {
++    return *value;
++  }
++
+   // Derived from Safari's UA string.
+   // This is done to expose our product name in a manner that is maximally
+   // compatible with Safari, we hope!!
+diff --git a/third_party/blink/common/user_agent/user_agent_metadata.cc b/third_party/blink/common/user_agent/user_agent_metadata.cc
+index 905d30f0925c46a3bc23f6f1afd10a8d96693b09..f2dc67f52f2df39c00afe2c58c16c90f1a4f1f24 100644
+--- a/third_party/blink/common/user_agent/user_agent_metadata.cc
++++ b/third_party/blink/common/user_agent/user_agent_metadata.cc
+@@ -6,11 +6,13 @@
+ 
+ #include <algorithm>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/containers/span.h"
+ #include "base/containers/to_vector.h"
+ #include "base/pickle.h"
+ #include "net/http/structured_headers.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/user_agent/user_agent_property_overrides.h"
+ 
+ namespace blink {
+ 
+@@ -237,4 +239,59 @@ bool operator==(const UserAgentOverride& a, const UserAgentOverride& b) {
+          a.ua_metadata_override == b.ua_metadata_override;
+ }
+ 
++void ApplyUserAgentPropertyOverrides(UserAgentMetadata& metadata,
++                                     bool only_low_entropy) {
++  auto brands =
++      base::android::webview::Brands("chromium.navigator.userAgentMeta.brands");
++  if (!brands.empty()) {
++    metadata.brand_version_list.clear();
++    for (const auto& [brand, version] : brands) {
++      metadata.brand_version_list.emplace_back(brand, version);
++    }
++  }
++  if (auto value = base::android::webview::GetBool(
++          "chromium.navigator.userAgentMeta.mobile")) {
++    metadata.mobile = *value;
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.platform")) {
++    metadata.platform = *value;
++  }
++  if (only_low_entropy) {
++    return;
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.platformVersion")) {
++    metadata.platform_version = *value;
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.architecture")) {
++    metadata.architecture = *value;
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.model")) {
++    metadata.model = *value;
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.fullVersion")) {
++    metadata.full_version = *value;
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.bitness")) {
++    metadata.bitness = *value;
++  }
++  if (auto value = base::android::webview::GetBool(
++          "chromium.navigator.userAgentMeta.wow64")) {
++    metadata.wow64 = *value;
++  }
++  auto full = base::android::webview::Brands(
++      "chromium.navigator.userAgentMeta.fullVersionList");
++  if (!full.empty()) {
++    metadata.brand_full_version_list.clear();
++    for (const auto& [brand, version] : full) {
++      metadata.brand_full_version_list.emplace_back(brand, version);
++    }
++  }
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/public/common/BUILD.gn b/third_party/blink/public/common/BUILD.gn
+index cada4d794bc822c3cf83e8c0b719f0d6da490f54..d1f6b8c294b1ce7db838849f84693070a5ee382a 100644
+--- a/third_party/blink/public/common/BUILD.gn
++++ b/third_party/blink/public/common/BUILD.gn
+@@ -299,6 +299,7 @@ source_set("headers") {
+     "use_counter/webdx_feature_maps.h",
+     "user_agent/user_agent_brand_version_type.h",
+     "user_agent/user_agent_metadata.h",
++    "user_agent/user_agent_property_overrides.h",
+     "view_source/rendering_preferences.h",
+     "web_cache/web_cache_resource_type_stats.h",
+     "web_package/signed_exchange_consts.h",
+diff --git a/third_party/blink/public/common/user_agent/user_agent_property_overrides.h b/third_party/blink/public/common/user_agent/user_agent_property_overrides.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5fa6ea7c87e51562d952c90f924b72b098c637e
+--- /dev/null
++++ b/third_party/blink/public/common/user_agent/user_agent_property_overrides.h
+@@ -0,0 +1,12 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef THIRD_PARTY_BLINK_PUBLIC_COMMON_USER_AGENT_USER_AGENT_PROPERTY_OVERRIDES_H_
++#define THIRD_PARTY_BLINK_PUBLIC_COMMON_USER_AGENT_USER_AGENT_PROPERTY_OVERRIDES_H_
++#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++namespace blink {
++BLINK_COMMON_EXPORT void ApplyUserAgentPropertyOverrides(
++    UserAgentMetadata& metadata,
++    bool only_low_entropy = false);
++}  // namespace blink
++#endif
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 48dada63e7b2dafe33aad9b4cd2bb91da34496c5..d44f663c4609bb5547040cf939ab04c36f028fe4 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -33,6 +33,7 @@
+ #include <ranges>
+ #include <utility>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/feature_list.h"
+ #include "cc/input/snap_selection_strategy.h"
+ #include "components/viz/common/surfaces/tracked_element_rects.h"
+@@ -2654,6 +2655,11 @@ int Element::clientWidth() {
+   if (IsViewportScrollElement()) {
+     auto* layout_view = GetDocument().GetLayoutView();
+     if (layout_view) {
++      if (auto value = base::android::webview::GetInt(
++              "chromium.document.clientWidth", 0, 100000)) {
++        return *value;
++      }
++
+       // TODO(crbug.com/740879): Use per-page overlay scrollbar settings.
+       if (!ScrollbarThemeSettings::OverlayScrollbarsEnabled() ||
+           !GetDocument().GetFrame()->IsLocalRoot()) {
+@@ -2697,6 +2703,11 @@ int Element::clientHeight() {
+   if (IsViewportScrollElement()) {
+     auto* layout_view = GetDocument().GetLayoutView();
+     if (layout_view) {
++      if (auto value = base::android::webview::GetInt(
++              "chromium.document.clientHeight", 0, 100000)) {
++        return *value;
++      }
++
+       // TODO(crbug.com/740879): Use per-page overlay scrollbar settings.
+       if (!ScrollbarThemeSettings::OverlayScrollbarsEnabled() ||
+           !GetDocument().GetFrame()->IsLocalRoot()) {
+diff --git a/third_party/blink/renderer/core/events/navigator_events.cc b/third_party/blink/renderer/core/events/navigator_events.cc
+index a57561775c1197c98d93aaddd96a47674b7ad953..14c3624c404bb920c226dd9619641eb2dcf65041 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -30,6 +30,7 @@
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -38,6 +39,11 @@
+ namespace blink {
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
++  if (auto value = base::android::webview::GetInt(
++          "chromium.navigator.maxTouchPoints", 0, 100)) {
++    return *value;
++  }
++
+   LocalDOMWindow* window = navigator.DomWindow();
+   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
+ }
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index 83f427c5ec9b75cbf41935af9935f9fa293ea11c..b1d435651e777638ee6c14fd16e025a362f91ec4 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -4,9 +4,11 @@
+ 
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/user_agent/user_agent_property_overrides.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+@@ -62,11 +64,20 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
+     : NavigatorLanguage(context), ExecutionContextClient(context) {}
+ 
+ String NavigatorBase::userAgent() const {
++  if (auto value = base::android::webview::UserAgent()) {
++    return String::FromUtf8(*value);
++  }
++
+   ExecutionContext* execution_context = GetExecutionContext();
+   return execution_context ? execution_context->UserAgent() : String();
+ }
+ 
+ String NavigatorBase::platform() const {
++  if (auto value =
++          base::android::webview::GetString("chromium.navigator.platform")) {
++    return String::FromUtf8(*value);
++  }
++
+ #if BUILDFLAG(IS_ANDROID)
+   // We need to check the ReduceUserAgentMinorVersion feature flag for
+   // Android WebView, which does not currently ship a reduced User-Agent.
+@@ -85,6 +96,11 @@ void NavigatorBase::Trace(Visitor* visitor) const {
+ }
+ 
+ unsigned int NavigatorBase::hardwareConcurrency() const {
++  if (auto value = base::android::webview::GetInt(
++          "chromium.navigator.hardwareConcurrency", 1, 1024)) {
++    return *value;
++  }
++
+   unsigned int hardware_concurrency =
+       NavigatorConcurrentHardware::hardwareConcurrency();
+ 
+@@ -99,8 +115,12 @@ ExecutionContext* NavigatorBase::GetUAExecutionContext() const {
+ 
+ UserAgentMetadata NavigatorBase::GetUserAgentMetadata() const {
+   ExecutionContext* execution_context = GetExecutionContext();
+-  return execution_context ? execution_context->GetUserAgentMetadata()
+-                           : blink::UserAgentMetadata();
++  auto metadata = execution_context ? execution_context->GetUserAgentMetadata()
++                                    : blink::UserAgentMetadata();
++  if (execution_context) {
++    blink::ApplyUserAgentPropertyOverrides(metadata);
++  }
++  return metadata;
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index f2aeb1ac0c53e368263d9a8788b71e1058647714..a1c7108a3aa2b5c0522da23f02fff4f34766ea65 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -30,6 +30,7 @@
+ #include <optional>
+ #include <utility>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/command_line.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -449,6 +450,10 @@ void LocalDOMWindow::SetWasmEvalErrorMessage(const String& error_message) {
+ }
+ 
+ String LocalDOMWindow::UserAgent() const {
++  if (auto value = base::android::webview::UserAgent()) {
++    return String::FromUtf8(*value);
++  }
++
+   if (!GetFrame()) {
+     return String();
+   }
+@@ -1692,6 +1697,16 @@ bool LocalDOMWindow::alwaysOnTop() const {
+ }
+ 
+ int LocalDOMWindow::outerHeight() const {
++  if (auto value = base::android::webview::GetInt("chromium.window.outerHeight",
++                                                  0, 100000)) {
++    return *value;
++  }
++
++  if (auto value = base::android::webview::GetInt("chromium.window.innerHeight",
++                                                  0, 100000)) {
++    return *value;
++  }
++
+   if (!GetFrame()) {
+     return 0;
+   }
+@@ -1724,6 +1739,16 @@ int LocalDOMWindow::outerHeight() const {
+ }
+ 
+ int LocalDOMWindow::outerWidth() const {
++  if (auto value = base::android::webview::GetInt("chromium.window.outerWidth",
++                                                  0, 100000)) {
++    return *value;
++  }
++
++  if (auto value = base::android::webview::GetInt("chromium.window.innerWidth",
++                                                  0, 100000)) {
++    return *value;
++  }
++
+   if (!GetFrame()) {
+     return 0;
+   }
+@@ -1789,6 +1814,11 @@ gfx::Size LocalDOMWindow::GetViewportSize() const {
+ }
+ 
+ int LocalDOMWindow::innerHeight() const {
++  if (auto value = base::android::webview::GetInt("chromium.window.innerHeight",
++                                                  0, 100000)) {
++    return *value;
++  }
++
+   if (!GetFrame()) {
+     return 0;
+   }
+@@ -1798,6 +1828,11 @@ int LocalDOMWindow::innerHeight() const {
+ }
+ 
+ int LocalDOMWindow::innerWidth() const {
++  if (auto value = base::android::webview::GetInt("chromium.window.innerWidth",
++                                                  0, 100000)) {
++    return *value;
++  }
++
+   if (!GetFrame()) {
+     return 0;
+   }
+diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
+index c76896e8f24549a1ca5164fdf311157dfa1fbd6a..fa2445673fdbf5ff7276789fdf7bd90b8e819d7c 100644
+--- a/third_party/blink/renderer/core/frame/local_frame.cc
++++ b/third_party/blink/renderer/core/frame/local_frame.cc
+@@ -37,6 +37,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/check_deref.h"
+ #include "base/debug/crash_logging.h"
+ #include "base/debug/dump_without_crashing.h"
+@@ -1923,6 +1924,11 @@ mojom::blink::DevicePostureType LocalFrame::GetDevicePosture() {
+ }
+ 
+ double LocalFrame::DevicePixelRatio() const {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.window.devicePixelRatio", 0.01, 100)) {
++    return *value;
++  }
++
+   if (!page_) {
+     return 0;
+   }
+diff --git a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+index 92e0ad7d40bbb43df320ddb48344817760d281ca..d9e0f28fc7e6e01123c48fa4b9751c4e32c510c7 100644
+--- a/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
++++ b/third_party/blink/renderer/core/frame/local_frame_client_impl.cc
+@@ -34,6 +34,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/containers/to_vector.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/time/time.h"
+@@ -960,6 +961,10 @@ String LocalFrameClientImpl::UserAgentOverride() {
+ }
+ 
+ String LocalFrameClientImpl::UserAgent() {
++  if (auto value = base::android::webview::UserAgent()) {
++    return String::FromUtf8(*value);
++  }
++
+   String override = UserAgentOverride();
+   if (!override.empty()) {
+     return override;
+diff --git a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
+index 72964f48db103e3588dd5d118c5252af121f737d..4c0e7d2b4153ba8d2b55cd7609df21fe3eeb0cd9 100644
+--- a/third_party/blink/renderer/core/frame/navigator.cc
++++ b/third_party/blink/renderer/core/frame/navigator.cc
+@@ -23,6 +23,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+@@ -40,6 +41,11 @@ namespace blink {
+ Navigator::Navigator(ExecutionContext* context) : NavigatorBase(context) {}
+ 
+ String Navigator::platform() const {
++  if (auto value =
++          base::android::webview::GetString("chromium.navigator.platform")) {
++    return String::FromUtf8(*value);
++  }
++
+   if (!DomWindow())
+     return NavigatorBase::platform();
+   const String& platform_override =
+@@ -49,6 +55,11 @@ String Navigator::platform() const {
+ }
+ 
+ bool Navigator::cookieEnabled() const {
++  if (auto value =
++          base::android::webview::GetBool("chromium.navigator.cookieEnabled")) {
++    return *value;
++  }
++
+   if (!DomWindow())
+     return false;
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e4568e8eea926a0d97c1d83a4000fa6b3f..4deca8246ac1f6157342e51d8096eb8a69d2bbef 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -12,6 +13,11 @@
+ namespace blink {
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.navigator.deviceMemory", 0.125, 1024)) {
++    return static_cast<float>(*value);
++  }
++
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index 26681d0fbc07f60ea3253d724037b9b281793b20..8d7f4c7f312fc8bc8c3c40319d710d6e1a79e819 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -31,6 +31,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_id.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -88,10 +89,20 @@ String NavigatorID::product() {
+ }
+ 
+ String NavigatorID::productSub() const {
++  if (auto value =
++          base::android::webview::GetString("chromium.navigator.productSub")) {
++    return String::FromUtf8(*value);
++  }
++
+   return "20030107";
+ }
+ 
+ String NavigatorID::vendor() const {
++  if (auto value =
++          base::android::webview::GetString("chromium.navigator.vendor")) {
++    return String::FromUtf8(*value);
++  }
++
+   // Do not change without good cause. History:
+   // https://code.google.com/p/chromium/issues/detail?id=276813
+   // https://www.w3.org/Bugs/Public/show_bug.cgi?id=27786
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index d75832c657c98f5b0340366e0d59d739f5a4ed98..2c77b678f7716a7faa2e3d7beef26294c2b13f25 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <utility>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/compiler_specific.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -45,40 +46,101 @@ NavigatorUAData::NavigatorUAData(ExecutionContext* context)
+ 
+ void NavigatorUAData::SetBrandVersionList(
+     const UserAgentBrandList& brand_version_list) {
++  brand_set_.clear();
++  auto configured =
++      base::android::webview::Brands("chromium.navigator.userAgentMeta.brands");
++  if (!configured.empty()) {
++    for (const auto& [brand, version] : configured) {
++      brand_set_.push_back(
++          MakeBrandVersion(String::FromUtf8(brand), String::FromUtf8(version)));
++    }
++    return;
++  }
++
+   AppendBrandVersions(brand_version_list, brand_set_);
+ }
+ 
+ void NavigatorUAData::SetFullVersionList(
+     const UserAgentBrandList& full_version_list) {
++  full_version_list_.clear();
++  auto configured = base::android::webview::Brands(
++      "chromium.navigator.userAgentMeta.fullVersionList");
++  if (!configured.empty()) {
++    for (const auto& [brand, version] : configured) {
++      full_version_list_.push_back(
++          MakeBrandVersion(String::FromUtf8(brand), String::FromUtf8(version)));
++    }
++    return;
++  }
++
+   AppendBrandVersions(full_version_list, full_version_list_);
+ }
+ 
+ void NavigatorUAData::SetMobile(bool mobile) {
++  if (auto value = base::android::webview::GetBool(
++          "chromium.navigator.userAgentMeta.mobile")) {
++    mobile = *value;
++  }
++
+   is_mobile_ = mobile;
+ }
+ 
+ void NavigatorUAData::SetPlatform(String brand, String version) {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.platform")) {
++    brand = String::FromUtf8(*value);
++  }
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.platformVersion")) {
++    version = String::FromUtf8(*value);
++  }
++
+   platform_ = std::move(brand);
+   platform_version_ = std::move(version);
+ }
+ 
+ void NavigatorUAData::SetArchitecture(String architecture) {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.architecture")) {
++    architecture = String::FromUtf8(*value);
++  }
++
+   architecture_ = std::move(architecture);
+ }
+ 
+ void NavigatorUAData::SetModel(String model) {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.model")) {
++    model = String::FromUtf8(*value);
++  }
++
+   model_ = std::move(model);
+ }
+ 
+ void NavigatorUAData::SetUAFullVersion(String ua_full_version) {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.fullVersion")) {
++    ua_full_version = String::FromUtf8(*value);
++  }
++
+   ua_full_version_ = std::move(ua_full_version);
+ }
+ 
+ void NavigatorUAData::SetBitness(String bitness) {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.userAgentMeta.bitness")) {
++    bitness = String::FromUtf8(*value);
++  }
++
+   bitness_ = std::move(bitness);
+ }
+ 
+ void NavigatorUAData::SetWoW64(bool wow64) {
++  if (auto value = base::android::webview::GetBool(
++          "chromium.navigator.userAgentMeta.wow64")) {
++    wow64 = *value;
++  }
++
+   is_wow64_ = wow64;
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index ed5028943e3d702f7332807f7fdff73c906dde51..16498731f793dd3ec202801a5acc4e8a1427c566 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -28,6 +28,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -88,18 +89,33 @@ bool Screen::AreWebExposedScreenPropertiesEqual(
+ }
+ 
+ int Screen::height() const {
++  if (auto value =
++          base::android::webview::GetInt("chromium.screen.height", 0, 100000)) {
++    return *value;
++  }
++
+   if (!DomWindow())
+     return 0;
+   return GetRect(/*available=*/false).height();
+ }
+ 
+ int Screen::width() const {
++  if (auto value =
++          base::android::webview::GetInt("chromium.screen.width", 0, 100000)) {
++    return *value;
++  }
++
+   if (!DomWindow())
+     return 0;
+   return GetRect(/*available=*/false).width();
+ }
+ 
+ unsigned Screen::colorDepth() const {
++  if (auto value = base::android::webview::GetInt("chromium.screen.colorDepth",
++                                                  1, 128)) {
++    return *value;
++  }
++
+   // "If the user agent does not know the color depth or does not want to
+   // return it for privacy considerations, it should return 24."
+   //
+@@ -131,12 +147,22 @@ int Screen::availTop() const {
+ }
+ 
+ int Screen::availHeight() const {
++  if (auto value = base::android::webview::GetInt("chromium.screen.availHeight",
++                                                  0, 100000)) {
++    return *value;
++  }
++
+   if (!DomWindow())
+     return 0;
+   return GetRect(/*available=*/true).height();
+ }
+ 
+ int Screen::availWidth() const {
++  if (auto value = base::android::webview::GetInt("chromium.screen.availWidth",
++                                                  0, 100000)) {
++    return *value;
++  }
++
+   if (!DomWindow())
+     return 0;
+   return GetRect(/*available=*/true).width();
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.cc b/third_party/blink/renderer/modules/battery/battery_manager.cc
+index 51cdc75ceee61457adf719c20188838d51bb4da5..f99ee3d6b3d3db80031a64a016e38d57d7b0cd2b 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_manager.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+@@ -80,18 +81,38 @@ ScriptPromise<BatteryManager> BatteryManager::StartRequest(
+ }
+ 
+ bool BatteryManager::charging() {
++  if (auto value = base::android::webview::GetBool(
++          "chromium.navigator.battery.charging")) {
++    return *value;
++  }
++
+   return battery_status_.Charging();
+ }
+ 
+ double BatteryManager::chargingTime() {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.navigator.battery.chargingTime", 0, 1e15)) {
++    return *value;
++  }
++
+   return battery_status_.charging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::dischargingTime() {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.navigator.battery.dischargingTime", 0, 1e15)) {
++    return *value;
++  }
++
+   return battery_status_.discharging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::level() {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.navigator.battery.level", 0, 1)) {
++    return *value;
++  }
++
+   return battery_status_.Level();
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/bluetooth/bluetooth.cc b/third_party/blink/renderer/modules/bluetooth/bluetooth.cc
+index a3a41a0cf1605f10f8f29bb7a3a9b1389c69d31a..8fc37cf448b1a7986c00a17058a5322b1d311bb5 100644
+--- a/third_party/blink/renderer/modules/bluetooth/bluetooth.cc
++++ b/third_party/blink/renderer/modules/bluetooth/bluetooth.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <utility>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "build/build_config.h"
+ #include "mojo/public/cpp/bindings/associated_receiver_set.h"
+ #include "mojo/public/cpp/bindings/pending_associated_remote.h"
+@@ -671,6 +672,11 @@ void Bluetooth::Trace(Visitor* visitor) const {
+ const char Bluetooth::kSupplementName[] = "Bluetooth";
+ 
+ Bluetooth* Bluetooth::bluetooth(Navigator& navigator) {
++  if (base::android::webview::GetBool("chromium.navigator.bluetooth") ==
++      false) {
++    return nullptr;
++  }
++
+   if (!navigator.DomWindow())
+     return nullptr;
+ 
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 81df80e2b5d92cfea9f2fa385c87c4996f9c9bd1..e1d9a9d8e5c77b95b0fd5665869d611fcf75fd05 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/time/time.h"
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink.h"
+ #include "third_party/blink/public/platform/task_type.h"
+@@ -84,6 +85,13 @@ bool NetworkInformation::IsObserving() const {
+ }
+ 
+ V8ConnectionType NetworkInformation::type() const {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.connection.type")) {
++    if (auto parsed = V8ConnectionType::Create(String::FromUtf8(*value))) {
++      return *parsed;
++    }
++  }
++
+   if (RuntimeEnabledFeatures::NetInfoConstantTypeEnabled()) {
+     return V8ConnectionType(V8ConnectionType::Enum::kUnknown);
+   }
+@@ -100,6 +108,11 @@ V8ConnectionType NetworkInformation::type() const {
+ }
+ 
+ double NetworkInformation::downlinkMax() const {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.navigator.connection.downlinkMax", 0, 1e9)) {
++    return *value;
++  }
++
+   if (RuntimeEnabledFeatures::NetInfoConstantTypeEnabled()) {
+     return std::numeric_limits<double>::infinity();
+   }
+@@ -111,6 +124,14 @@ double NetworkInformation::downlinkMax() const {
+ }
+ 
+ V8EffectiveConnectionType NetworkInformation::effectiveType() {
++  if (auto value = base::android::webview::GetString(
++          "chromium.navigator.connection.effectiveType")) {
++    if (auto parsed =
++            V8EffectiveConnectionType::Create(String::FromUtf8(*value))) {
++      return *parsed;
++    }
++  }
++
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<WebEffectiveConnectionType> override_ect =
+       GetNetworkStateNotifier().GetWebHoldbackEffectiveType();
+@@ -132,6 +153,11 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
++  if (auto value = base::android::webview::GetInt(
++          "chromium.navigator.connection.rtt", 0, 2147483647)) {
++    return *value;
++  }
++
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<base::TimeDelta> override_rtt =
+       GetNetworkStateNotifier().GetWebHoldbackHttpRtt();
+@@ -148,6 +174,11 @@ uint32_t NetworkInformation::rtt() {
+ }
+ 
+ double NetworkInformation::downlink() {
++  if (auto value = base::android::webview::GetDouble(
++          "chromium.navigator.connection.downlink", 0, 1e9)) {
++    return *value;
++  }
++
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<double> override_downlink_mbps =
+       GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc b/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
+index 9b56b6bd5c6a0aa03c3ebc01fd4acb2d198eeaa5..aa4e077724550483ceb5e08c9e7ccd457373f9ac 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_ice_candidate.cc
+@@ -34,6 +34,7 @@
+ #include <optional>
+ #include <utility>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_ice_candidate_init.h"
+@@ -86,7 +87,8 @@ RTCIceCandidate::RTCIceCandidate(RTCIceCandidatePlatform* platform_candidate)
+     : platform_candidate_(platform_candidate) {}
+ 
+ String RTCIceCandidate::candidate() const {
+-  return platform_candidate_->Candidate();
++  return String::FromUtf8(base::android::webview::IceCandidate(
++      platform_candidate_->Candidate().Utf8()));
+ }
+ 
+ String RTCIceCandidate::sdpMid() const {
+@@ -119,6 +121,13 @@ std::optional<uint32_t> RTCIceCandidate::priority() const {
+ }
+ 
+ String RTCIceCandidate::address() const {
++  if (base::android::webview::IsIPv4(platform_candidate_->Address().Utf8())) {
++    if (auto ip = base::android::webview::IceAddress(
++            platform_candidate_->Type().Utf8(), false)) {
++      return String::FromUtf8(*ip);
++    }
++  }
++
+   return platform_candidate_->Address();
+ }
+ 
+@@ -143,6 +152,14 @@ std::optional<V8RTCIceTcpCandidateType> RTCIceCandidate::tcpType() const {
+ }
+ 
+ String RTCIceCandidate::relatedAddress() const {
++  if (base::android::webview::IsIPv4(
++          platform_candidate_->RelatedAddress().Utf8())) {
++    if (auto ip = base::android::webview::IceAddress(
++            platform_candidate_->Type().Utf8(), true)) {
++      return String::FromUtf8(*ip);
++    }
++  }
++
+   return platform_candidate_->RelatedAddress();
+ }
+ 
+@@ -169,7 +186,7 @@ std::optional<V8RTCIceServerTransportProtocol> RTCIceCandidate::relayProtocol()
+ 
+ ScriptObject RTCIceCandidate::toJSONForBinding(ScriptState* script_state) {
+   V8ObjectBuilder result(script_state);
+-  result.AddString("candidate", platform_candidate_->Candidate());
++  result.AddString("candidate", candidate());
+   result.AddString("sdpMid", platform_candidate_->SdpMid());
+   if (platform_candidate_->SdpMLineIndex())
+     result.AddNumber("sdpMLineIndex", *platform_candidate_->SdpMLineIndex());
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc b/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc
+index 40d470ffc2ffdeb400592ff580f3c2ca8952da67..4d38cf81536e5a2295160a843afc032c15ea68f3 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_session_description.cc
+@@ -32,6 +32,7 @@
+ 
+ #include <optional>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_sdp_type.h"
+@@ -86,7 +87,8 @@ void RTCSessionDescription::setType(std::optional<V8RTCSdpType> type) {
+ }
+ 
+ String RTCSessionDescription::sdp() const {
+-  return platform_session_description_->Sdp();
++  return String::FromUtf8(base::android::webview::RedactSdp(
++      platform_session_description_->Sdp().Utf8()));
+ }
+ 
+ void RTCSessionDescription::setSdp(const String& sdp) {
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+index 7a899b0d8cf249d1a01bbc08be8e83e23e6735d9..8942cd23093e4c977386f37bfe0bfd15b2a53663 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -30,6 +30,7 @@
+ 
+ #include <memory>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/check_op.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+@@ -181,6 +182,7 @@ AudioBuffer::AudioBuffer(unsigned number_of_channels,
+     }
+ 
+     channels_.push_back(channel_data_array);
++    property_noise_applied_.push_back(0);
+   }
+ }
+ 
+@@ -199,6 +201,7 @@ AudioBuffer::AudioBuffer(AudioBus* bus)
+     }
+     channel_data_array->AsSpan().copy_from(bus->Channel(i)->Span());
+     channels_.push_back(channel_data_array);
++    property_noise_applied_.push_back(0);
+   }
+ }
+ 
+@@ -217,11 +220,24 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
+   return getChannelData(channel_index);
+ }
+ 
++void AudioBuffer::MaybeApplyPropertyNoise(unsigned channel_index) {
++  if (property_noise_applied_[channel_index]) {
++    return;
++  }
++  auto seed = base::android::webview::GetDouble("chromium.audio.randomDouble",
++                                                -1e9, 1e9);
++  if (seed && base::android::webview::PerturbAudio(
++                  channels_[channel_index]->AsSpan(), *seed)) {
++    property_noise_applied_[channel_index] = 1;
++  }
++}
++
+ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
+   if (channel_index >= channels_.size()) {
+     return NotShared<DOMFloat32Array>(nullptr);
+   }
+ 
++  MaybeApplyPropertyNoise(channel_index);
+   return NotShared<DOMFloat32Array>(channels_[channel_index].Get());
+ }
+ 
+@@ -252,6 +268,9 @@ void AudioBuffer::copyFromChannel(NotShared<DOMFloat32Array> destination,
+     return;
+   }
+ 
++  if (buffer_offset < length_) {
++    MaybeApplyPropertyNoise(channel_number);
++  }
+   base::span<const float> src = channels_[channel_number].Get()->AsSpan();
+   base::span<float> dst = destination->AsSpan();
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.h b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+index 0dd11f830ee2829778b6c89ec51edeb1da839f74..cc0c66ab44a867c81e8f6cacc0a61d17f18188a7 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+@@ -122,6 +122,8 @@ class MODULES_EXPORT AudioBuffer final : public ScriptWrappable {
+   float sample_rate_;
+   uint32_t length_;
+ 
++  void MaybeApplyPropertyNoise(unsigned channel_index);
++  Vector<uint8_t> property_noise_applied_;
+   HeapVector<Member<DOMFloat32Array>> channels_;
+ };
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 4a0ae32e131afcf184abe28dcdd6910582062129..22c9f688e11d1f7ce43fb7361fcc892d6fea5c79 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -30,6 +30,7 @@
+ #include <memory>
+ #include <utility>
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/bit_cast.h"
+ #include "base/byte_size.h"
+ #include "base/compiler_specific.h"
+@@ -171,7 +172,6 @@
+ #include "third_party/skia/include/gpu/ganesh/GrTypes.h"
+ #include "ui/gfx/geometry/size.h"
+ 
+-
+ // Populates parameters from texImage2D except for border, width, height, and
+ // depth (which are not present for all texImage2D functions).
+ #define POPULATE_TEX_IMAGE_2D_PARAMS(params, src_type) \
+@@ -4267,6 +4267,10 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        if (auto value = base::android::webview::GetString(
++                "chromium.webgl.unmasked_renderer")) {
++          return WebGLAny(script_state, String::FromUtf8(*value));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4276,6 +4280,10 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        if (auto value = base::android::webview::GetString(
++                "chromium.webgl.unmasked_vendor")) {
++          return WebGLAny(script_state, String::FromUtf8(*value));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
+diff --git a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+index 89f8fff042d63f0d9327683ede533cb082a7ae1b..05a0b0d3c53f847ed3a8fe4c9ce3d05620530603 100644
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+@@ -32,6 +32,7 @@
+ 
+ #include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
+ 
++#include "base/android/webview_property_overrides.h"
+ #include "base/compiler_specific.h"
+ #include "base/logging.h"
+ #include "base/memory/ptr_util.h"
+@@ -147,7 +148,32 @@ String ImageDataBuffer::ToDataURL(const ImageEncodingMimeType mime_type,
+                                   const double& quality) const {
+   DCHECK(is_valid_);
+   Vector<unsigned char> result;
+-  if (!ImageEncoder::Encode(&result, pixmap_, mime_type, quality)) {
++  SkPixmap export_pixmap = pixmap_;
++  sk_sp<SkData> export_pixels;
++  auto seed = base::android::webview::GetDouble(
++      "chromium.canvas.toDataUrl.randomDouble", -1e9, 1e9);
++  if (seed && *seed != 0 &&
++      (pixmap_.colorType() == kRGBA_8888_SkColorType ||
++       pixmap_.colorType() == kBGRA_8888_SkColorType)) {
++    export_pixels =
++        gfx::MakeSkDataFromSpanWithCopy(gfx::SkPixmapToSpan(pixmap_));
++    export_pixmap = SkPixmap(pixmap_.info(), export_pixels->writable_data(),
++                             pixmap_.rowBytes());
++    auto bytes = gfx::SkPixmapToWritableSpan(export_pixmap);
++    // Select a row from the configured seed. Skip transparent pixels so
++    // changing a color byte cannot violate premultiplied alpha constraints.
++    size_t row =
++        static_cast<size_t>(std::fmod(std::abs(*seed) * 1e6, pixmap_.height()));
++    size_t start = row * pixmap_.rowBytes();
++    for (int x = 0; x < pixmap_.width(); ++x) {
++      size_t pixel = start + static_cast<size_t>(x) * 4;
++      if (bytes[pixel + 3] == 255) {
++        bytes[pixel] ^= 1;
++        break;
++      }
++    }
++  }
++  if (!ImageEncoder::Encode(&result, export_pixmap, mime_type, quality)) {
+     return "data:,";
+   }
+   return StrCat({"data:", ImageEncoderUtils::MimeTypeName(mime_type),
+diff --git a/webview_custom/PROPERTY_PATCHES.md b/webview_custom/PROPERTY_PATCHES.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e38ce69135fea106bfad35f6565a7de1fa675ca
+--- /dev/null
++++ b/webview_custom/PROPERTY_PATCHES.md
+@@ -0,0 +1,71 @@
++# Chromium 130 补丁向 158 的迁移
++
++目标为 158.0.8109.0 / Android 10+ / arm64。保留此前 Window/document/navigator Replaceable、Canvas fillRect 噪声及桌面定制。26 个原补丁按功能迁移，不执行旧下载脚本、不回退 Chromium 版本。
++
++## 配置
++
++新功能默认关闭。由具有 Android 属性写权限的控制程序设置 `chromium.enable=1` 后启用；普通第三方 App、adb shell 在 user ROM 上可能无权写入，renderer 的属性读取也受 SELinux 控制。构建签名不会赋予这些权限；必须在目标 ROM 实测。未设置、空值或 `-` 保持 Chromium 默认（X-Requested-With 的空值例外）。修改配置后重启宿主 App 并重新加载页面；UA-CH 为对象/导航快照。
++
++```sh
++# 在具有属性写权限的设备 shell 中执行
++setprop chromium.navigator.hardwareConcurrency 8
++setprop chromium.navigator.deviceMemory 8
++setprop chromium.screen.width 1080
++setprop chromium.screen.height 1920
++setprop chromium.config.x_requested_with com.example.app
++setprop chromium.enable 1
++# 全局关闭本次迁移新增功能
++setprop chromium.enable 0
++```
++
++| 属性（均以 chromium. 开头） | 用途及格式 |
++| --- | --- |
++| config.x_requested_with | 未设置或 `-`：原生包名策略；非空：强制替换；显式空字符串：删除，示例 `setprop chromium.config.x_requested_with ''` |
++| navigator.useragent / useragent2 / useragent3 | 按顺序拼接 HTTP / JS UA，首段必须非空；拒绝控制字符。每段受 Android 属性长度限制 |
++| navigator.userAgentMeta.brands / fullVersionList | `Chromium,158&Android WebView,158` 格式，完整版本单独配置，拒绝不完整条目 |
++| navigator.userAgentMeta.mobile / wow64 | 0/1 或 false/true |
++| navigator.userAgentMeta.platform / platformVersion / architecture / model / fullVersion / bitness | UA-CH 字段；保留高熵提示权限策略与按需发送规则 |
++| navigator.productSub / vendor / platform | JS Navigator 字符串，含继承自 NavigatorID 的字段 |
++| navigator.cookieEnabled | 0/1 或 false/true；仅报告值，不改变 Cookie 权限和存储 |
++| navigator.hardwareConcurrency | 整数 1..1024 |
++| navigator.deviceMemory | 有限数 0.125..1024（GiB 的报告值） |
++| navigator.maxTouchPoints | 整数 0..100 |
++| document.clientWidth / clientHeight | 0..100000，仅 viewport 元素的 getter |
++| window.innerWidth / innerHeight | 0..100000，兼容原包作为 outer 的回退值 |
++| window.outerWidth / outerHeight | 0..100000，新增独立配置，优先于 inner 回退值 |
++| window.devicePixelRatio | 有限数 0.01..100；报告值，不改变硬件分辨率 |
++| screen.width / height / availWidth / availHeight | 整数 0..100000 |
++| screen.colorDepth | 整数 1..128，pixelDepth 跟随 |
++| navigator.battery.charging | 0/1 或 false/true |
++| navigator.battery.chargingTime / dischargingTime | 有限秒数 0..1e15 |
++| navigator.battery.level | 有限数 0..1 |
++| navigator.bluetooth | false/0 时 getter 返回 null；true 不强制打开原本不可用的 API |
++| navigator.connection.type | bluetooth/cellular/ethernet/mixed/none/other/unknown/wifi/wimax，按 158 IDL 枚举校验 |
++| navigator.connection.effectiveType | slow-2g/2g/3g/4g，按 IDL 校验 |
++| navigator.connection.downlinkMax / downlink | 有限数 0..1e9（Mbps） |
++| navigator.connection.rtt | 整数 0..2147483647（毫秒） |
++| webrtc.public_ip / private_ip | 有效 IPv4；替换 ICE candidate/address/relatedAddress/toJSON 的报告值，保留端口和 raddr/rport 结构；IPv6/mDNS 保持原样，不改变真实网络出口 |
++| webrtc.sdp_redact | 新增独立开关；true/1 时移除 SDP candidate 行并将 c=IN IP4 置为 0.0.0.0。默认不做；可能影响复制 SDP 建立连接 |
++| audio.randomDouble | 有限配置数，0 关闭；每个声道首次有效读取统一处理一次，增量 clamp(seed*0.123, -1e-5, 1e-5)，保留零和非有限样本；两种读取接口共享数据 |
++| webgl.unmasked_vendor / unmasked_renderer | 仅修改 WEBGL_debug_renderer_info 解锁后的字符串；保留扩展及 context-lost 检查，不改变真实 GPU |
++| canvas.toDataUrl.randomDouble | 有限配置数，0 关闭；选择一行，在不透明的 8-bit RGBA/BGRA 像素中翻转一个颜色位后正常编码。无法处理的格式保持原样；不改原画布、不修改编码尾字节、不影响 toBlob/getImageData |
++
++数值解析失败、越界或 NaN/Infinity 会回退原值，不输出逐次 WARNING 日志。各项仅改变暴露的值或文中所述数据；不绕过 API 可用性、权限、安全上下文或宿主设置。
++
++此前 `CanvasFillRectNoise` 独立于 `chromium.enable`，仍保持原来的默认开关。Android user ROM 不保证读取 `/data/local/tmp/webview-command-line`，不能依靠该文件停用它。
++
++## 原补丁处理
++
++- 0001：迁至 components/embedder_support 的新 UA 入口，并保留 renderer/worker 覆盖。
++- 0002、0014：统一 UA-CH 数据源，分别处理 major/full brands，保留高熵权限控制。
++- 0003、0005：合并为 WebView 请求头策略，覆盖已有值、删除值、重定向及预取；不修改全局 net::HttpRequestHeaders。
++- 0004、0020：只有 include/空行，无行为，不移植无效修改。
++- 0006..0013、0015..0018、0024：迁移对应 getter，补齐验证，适配新枚举接口。
++- 0019、0021：修复条件分支覆盖与无条件写死 IP，使用结构化 token 替换，SDP 脱敏单独启用。
++- 0022、0023：修复未初始化标志、声道处理范围、重复加噪及复制前后不一致；限制噪声幅度。
++- 0025：改为像素副本编码，避免破坏 PNG/JPEG/WebP 编码数据。
++- 0026：旧功能已移除，158 的原生自动 X-Requested-With 注入由新策略协调，不重新引入旧 flag。
++
++## 验证
++
++`python3 webview_custom/test_properties.py` 使用生产头文件及假的 Android 属性服务，编译运行配置、请求头操作、UA、brands、ICE/SDP 与音频测试；并运行现有 `test_noise.py`。APK 构建检查实际 Android/arm64 编译与链接。主机测试不能代替 RK14 的属性权限、真实网络和页面测试。
+diff --git a/webview_custom/README.md b/webview_custom/README.md
+index ea18649f7af43fe13735b3a06e90accdea4089c9..76b83b2f8600afd3ea34016c76e954f9588061ed 100644
+--- a/webview_custom/README.md
++++ b/webview_custom/README.md
+@@ -34,3 +34,7 @@ CHROMIUM_WEBVIEW_BUILD_ONLY=1 /home/qiled/chromium-android-latest/run-webview-bu
+ ```
+ 
+ 不要在自定义分支直接运行默认同步流程；它会更新上游源码。使用 `git ours-log` 查看自定义提交，`git ours-diff` 查看相对基线的修改。
++
++## Chromium 130 整包功能迁移
++
++系统属性配置与逐项迁移说明见 [PROPERTY_PATCHES.md](PROPERTY_PATCHES.md)。
+diff --git a/webview_custom/test_properties.py b/webview_custom/test_properties.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc7606013f7f60429e02d8c3b51bb1042bc7d1e5
+--- /dev/null
++++ b/webview_custom/test_properties.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""Compile and exercise the production property helper using fake Android APIs."""
++from pathlib import Path
++import subprocess, tempfile, shutil
++
++root = Path(__file__).parent
++with tempfile.TemporaryDirectory(prefix='webview-properties-') as work:
++    p = Path(work)
++    (p/'build').mkdir()
++    (p/'sys').mkdir()
++    (p/'build/build_config.h').write_text('#define BUILDFLAG(x) 1\n')
++    (p/'sys/system_properties.h').write_text('''#include <cstdint>
++#include <map>
++#include <string>
++struct prop_info { std::string name; std::string value; };
++inline std::map<std::string, prop_info> props;
++inline const prop_info* __system_property_find(const char* name) {
++  auto it = props.find(name); return it == props.end() ? nullptr : &it->second;
++}
++inline void __system_property_read_callback(const prop_info* p,
++ void (*callback)(void*,const char*,const char*,uint32_t), void* cookie) {
++ callback(cookie,p->name.c_str(),p->value.c_str(),0);
++}
++''')
++    shutil.copyfile(root.parent/'base/android/webview_property_overrides.h', p/'production.h')
++    (p/'test.cc').write_text(r'''
++#include "production.h"
++#include <array>
++#include <cassert>
++#include <span>
++#include <limits>
++using namespace base::android::webview;
++void set(const char* name, const char* value) { props[name] = {name,value}; }
++struct HeaderUpdates {
++  std::vector<std::string> operations;
++  void RemoveHeader(std::string_view key) { operations.push_back("remove:"+std::string(key)); }
++  void SetCorsExemptHeader(std::string_view key, std::string_view value) { operations.push_back("cors:"+std::string(key)+"="+std::string(value)); }
++  void SetHeader(std::string_view key, std::string_view value) { operations.push_back("set:"+std::string(key)+"="+std::string(value)); }
++};
++int main() {
++  assert(!Enabled()); assert(!RequestedWith());
++  set("chromium.config.x_requested_with","replacement");
++  assert(!RequestedWith());
++  set("chromium.enable","1"); assert(RequestedWith() == "replacement");
++  HeaderUpdates replacement; ApplyRequestHeaderOverrides(replacement);
++  assert((replacement.operations==std::vector<std::string>{"remove:X-Requested-With","cors:X-Requested-With=replacement"}));
++  set("chromium.config.x_requested_with",""); assert(RequestedWith() == "");
++  HeaderUpdates removal; ApplyRequestHeaderOverrides(removal);
++  assert((removal.operations==std::vector<std::string>{"remove:X-Requested-With"}));
++  set("chromium.config.x_requested_with","-"); assert(!RequestedWith());
++  set("chromium.config.x_requested_with","bad\r\nInjected: yes");
++  assert(!RequestedWith());
++  props.erase("chromium.config.x_requested_with"); assert(!RequestedWith());
++  for (const char* invalid : {"NaN","inf","-1","999999999999999999999","12x"," 12"}) {
++    set("number",invalid); assert(!GetInt("number",0,100));
++    assert(!GetDouble("number",0,100));
++  }
++  set("number","12"); assert(GetInt("number",0,100)==12);
++  set("number","0.5"); assert(GetDouble("number",0,1)==0.5);
++  set("boolean","0"); assert(GetBool("boolean")==false);
++  set("boolean","true"); assert(GetBool("boolean")==true);
++  set("boolean","nope"); assert(!GetBool("boolean"));
++  set("chromium.navigator.useragent","Mozilla/");
++  set("chromium.navigator.useragent2","5.0 ");
++  set("chromium.navigator.useragent3","test"); assert(UserAgent()=="Mozilla/5.0 test");
++  set("chromium.navigator.useragent2","\nbad"); assert(!UserAgent());
++  set("brands","A,158&B,1"); assert(Brands("brands").size()==2);
++  for (const char* invalid : {"broken","A,1&","A,1&B","A,1,2",",1"}) {
++    set("brands",invalid); assert(Brands("brands").empty());
++  }
++  assert(IsIPv4("192.0.2.7")); assert(!IsIPv4("999.0.0.1"));
++  assert(!IsIPv4("1.2.3")); assert(!IsIPv4("1.2.3.4.5"));
++  set("chromium.webrtc.public_ip","203.0.113.5");
++  set("chromium.webrtc.private_ip","192.168.2.10");
++  auto srflx = IceCandidate("candidate:1 1 udp 1 198.51.100.7 4567 typ srflx raddr 10.0.0.1 rport 1234");
++  assert(srflx=="candidate:1 1 udp 1 203.0.113.5 4567 typ srflx raddr 192.168.2.10 rport 1234");
++  assert(IceCandidate("candidate:2 1 udp 1 abc.local 1 typ host")=="candidate:2 1 udp 1 abc.local 1 typ host");
++  assert(IceCandidate("")=="");
++  std::string sdp="v=0\r\nc=IN IP4 198.51.100.7\r\na=candidate:1 1 udp 1 10.0.0.1 5 typ host\r\nm=audio 9 UDP 1\r\n";
++  assert(RedactSdp(sdp)==sdp);
++  set("chromium.webrtc.sdp_redact","1");
++  assert(RedactSdp(sdp)=="v=0\r\nc=IN IP4 0.0.0.0\r\nm=audio 9 UDP 1\r\n");
++  std::array<float,4> data={0,0.1f,-0.2f,std::numeric_limits<float>::infinity()};
++  assert(PerturbAudio(std::span(data),10));
++  assert(data[0]==0 && std::abs(data[1]-0.10001f)<1e-7f);
++  assert(std::isinf(data[3]));
++  std::array<float,4> silence={}; assert(!PerturbAudio(std::span(silence),1));
++  set("chromium.enable","0"); assert(!GetInt("number",0,100));
++  assert(RedactSdp(sdp)==sdp);
++}
++''')
++    compiler = shutil.which('clang++') or shutil.which('g++')
++    subprocess.run([compiler,'-std=c++20','-Wall','-Wextra','-Werror','-I',str(p),str(p/'test.cc'),'-o',str(p/'test')],check=True)
++    subprocess.run([str(p/'test')],check=True)
++print('PASS: production property parsing, header policy values, UA, brands, ICE/SDP and audio helpers')

@@ -1,0 +1,247 @@
+From 1586193d4587f24379bec1f3365c98e4325eda85 Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 21:28:44 +0800
+Subject: [PATCH] Fix patch compatibility, navigator replacement and Canvas
+ noise overhead
+
+
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index d2a52ab870e69d05d82b4f99c38a2c9d099ae7d6..e9b01aa9df319b700a9226f9b94e9e4c7b58067b 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -80,7 +80,7 @@
+     // getter object (DOMString name);
+ 
+     // the user agent
+-    [LogActivity=GetterOnly] readonly attribute Navigator navigator;
++    [Replaceable, LogActivity=GetterOnly] readonly attribute Navigator navigator;
+ 
+     [RuntimeEnabled=OriginIsolationHeader] readonly attribute boolean originAgentCluster;
+ 
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h
+index 25b4619ce8137c5bdb7ad4fb54333fdf3d74924d..154dd963e29baf74c5cc15ca1ac0e08fa18cd75b 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h
+@@ -5,13 +5,23 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_CANVAS_CANVAS2D_BASE_RENDERING_CONTEXT_RANDOM_H_
+ #define THIRD_PARTY_BLINK_RENDERER_MODULES_CANVAS_CANVAS2D_BASE_RENDERING_CONTEXT_RANDOM_H_
+ 
++#include <array>
++#include <cstdint>
++
+ #include "base/rand_util.h"
+ 
+ namespace blink {
+ 
+-// Independent integer offset for each coordinate/dimension of a fillRect call.
+-inline int GetCanvasRandomInt() {
+-  return base::RandInt(-1, 1);
++// One uniform sample over the 81 equally likely combinations gives four
++// independent offsets in [-1, 1], without four calls to the random source.
++inline std::array<int, 4> GetCanvasFillRectNoise() {
++  uint64_t sample = base::RandGenerator(81);
++  std::array<int, 4> offsets;
++  for (int& offset : offsets) {
++    offset = static_cast<int>(sample % 3) - 1;
++    sample /= 3;
++  }
++  return offsets;
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+index 157341cc3792eff8959761b5172f937174f305f2..ecdf30c5723b7e05409a0f70ea9793318b51e99a 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+@@ -1760,11 +1760,12 @@ void Canvas2DRecorderContext::fillRect(double x,
+   CanvasRenderingContext::AdjustRectForCanvas(x, y, width, height);
+   if (RuntimeEnabledFeatures::CanvasFillRectNoiseEnabled() && width != 0 &&
+       height != 0) {
+-    x += GetCanvasRandomInt();
+-    y += GetCanvasRandomInt();
++    const auto offsets = GetCanvasFillRectNoise();
++    x += offsets[0];
++    y += offsets[1];
+     // Keep tiny rectangles non-negative and zero-size draws unchanged.
+-    width = std::max(0.0, width + GetCanvasRandomInt());
+-    height = std::max(0.0, height + GetCanvasRandomInt());
++    width = std::max(0.0, width + offsets[2]);
++    height = std::max(0.0, height + offsets[3]);
+   }
+   // Clamp to float to avoid float cast overflow when used as SkScalar.
+   gfx::RectF rect(ClampTo<float>(x), ClampTo<float>(y), ClampTo<float>(width),
+diff --git a/webview_custom/README.md b/webview_custom/README.md
+index fb9b1b70739e8140235cccef7b427e604f2d5cb5..68b76abb32e15199fcbe7096bbe092b29a7f71b9 100644
+--- a/webview_custom/README.md
++++ b/webview_custom/README.md
+@@ -8,11 +8,12 @@
+ ## WebView 修改
+ 
+ 1. `Window.window`、`Window.document` 从 `LegacyUnforgeable` 改为 `Replaceable`，保留跨域限制与缓存属性。
+-2. `fillRect` 为 x、y、width、height 分别生成独立的 `[-1, 1]` 整数偏移。原包缺少随机函数头文件，经用户授权使用 Chromium `base::RandInt` 补齐。
+-3. 保留原始无效参数处理；零宽高不加噪，负尺寸先按上游逻辑归一化，扰动后的宽高下限为 0。
+-4. `CanvasFillRectNoise` 默认开启，可用 `--disable-blink-features=CanvasFillRectNoise` 恢复上游 Canvas 绘制。此修改影响 HTML Canvas 和 OffscreenCanvas 的共用绘制入口；每次绘制可能得到不同图像。
++2. 为 `Window.navigator` 补上 `Replaceable`，修复原包直接赋值 Proxy 的示例与只读 IDL 不一致的问题。
++3. `fillRect` 为 x、y、width、height 分别生成独立的 `[-1, 1]` 整数偏移。原包缺少随机函数头文件，经用户授权使用 Chromium `base::RandGenerator(81)` 一次均匀采样，拆成四个三进制位 补齐。
++4. 保留原始无效参数处理；零宽高不加噪，负尺寸先按上游逻辑归一化，扰动后的宽高下限为 0。
++5. `CanvasFillRectNoise` 默认开启，可用 `--disable-blink-features=CanvasFillRectNoise` 恢复上游 Canvas 绘制。此修改影响 HTML Canvas 和 OffscreenCanvas 的共用绘制入口；每次绘制可能得到不同图像。
+ 
+-`navigator`、`screen` 在输入包中没有新的功能实现，当前版本的配置属性保持原样。输入包没有 WebGL 随机化或无限 debugger 处理源码，这两项未实现。
++输入包的 `navigator` 修改只有注释，审查后补齐赋值支持；`screen` 已有 `Replaceable`，无需修改。输入包没有 WebGL 随机化或无限 debugger 处理源码，这两项未实现。
+ 
+ ## 桌面 Chrome 修改
+ 
+@@ -22,6 +23,8 @@
+ 
+ ## 验证
+ 
++`python3 webview_custom/test_noise.py` 使用可控随机源，穷举检查生产头文件的全部 81 种输出、各轴分布和每次调用的采样次数。此测试不需要 Android 设备。
++
+ `smoke.html` 可在使用此 WebView 的 Android 测试应用中加载，检查对象替换、跨域限制、Canvas 扰动范围、零尺寸和非法参数。正常模式应显示全部 PASS。关闭噪声开关后加载 `smoke.html?noise=off` 检查上游绘制恢复。没有连接 Android 设备时，不将编译或 APK 签名检查视为运行测试通过。
+ 
+ 增量编译时使用：
+diff --git a/webview_custom/smoke.html b/webview_custom/smoke.html
+index d2dd92f7916d3de01b9100741afa4328662208ed..27d709470bc72a13dc40a90f96149dd9dc26d3b6 100644
+--- a/webview_custom/smoke.html
++++ b/webview_custom/smoke.html
+@@ -40,8 +40,10 @@
+       assert(w.document === documentProxy, 'document assignment was ignored');
+       for (const property of ['navigator', 'screen']) {
+         const replacement = new Proxy(w[property], {});
+-        Object.defineProperty(w, property, {value: replacement, configurable: true});
+-        assert(w[property] === replacement, property + ' could not be configured');
++        w[property] = replacement;
++        assert(w[property] === replacement, property + ' assignment was ignored');
++        assert(Object.getOwnPropertyDescriptor(w, property).configurable,
++               property + ' must remain configurable');
+       }
+       assert(!Reflect.defineProperty(w, 'location', {value: {}}),
+              'location must remain protected');
+@@ -50,23 +52,37 @@
+     }
+   });
+ 
+-  await test('Cross-origin document remains protected', async () => {
++  await test('Cross-origin window/document/navigator remain protected', async () => {
+     const frame = document.createElement('iframe');
+     frame.sandbox = 'allow-scripts';
+     frame.srcdoc = '<!doctype html><title>opaque origin</title>';
+-    const loaded = new Promise(resolve => frame.onload = resolve);
++    let timer;
++    const loaded = new Promise((resolve, reject) => {
++      timer = setTimeout(() => reject(new Error('iframe load timed out')), 15000);
++      frame.onload = () => { clearTimeout(timer); resolve(); };
++      frame.onerror = () => { clearTimeout(timer); reject(new Error('iframe load failed')); };
++    });
+     document.body.appendChild(frame);
+     try {
+       await loaded;
++      const remote = frame.contentWindow;
++      assert(remote.window === remote, 'cross-origin window getter changed');
++      for (const property of ['document', 'navigator']) {
++        let denied = false;
++        try { void remote[property]; }
++        catch (error) { denied = error.name === 'SecurityError'; }
++        assert(denied, 'cross-origin ' + property + ' read was allowed');
++        denied = false;
++        try { remote[property] = {}; }
++        catch (error) { denied = error.name === 'SecurityError'; }
++        assert(denied, 'cross-origin ' + property + ' write was allowed');
++      }
+       let denied = false;
+-      try { void frame.contentWindow.document; }
+-      catch (error) { denied = error.name === 'SecurityError'; }
+-      assert(denied, 'cross-origin document read was allowed');
+-      denied = false;
+-      try { frame.contentWindow.document = {}; }
++      try { remote.window = {}; }
+       catch (error) { denied = error.name === 'SecurityError'; }
+-      assert(denied, 'cross-origin document write was allowed');
++      assert(denied, 'cross-origin window write was allowed');
+     } finally {
++      clearTimeout(timer);
+       frame.remove();
+     }
+   });
+diff --git a/webview_custom/test_noise.py b/webview_custom/test_noise.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2352b293c8667cc16e99b2d1c1fb9c70bb186a6
+--- /dev/null
++++ b/webview_custom/test_noise.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python3
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++"""Exhaustively test production noise mapping with an injected random source."""
++
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++
++
++def main():
++    root = Path(__file__).resolve().parents[1]
++    compiler = shutil.which('clang++') or shutil.which('g++')
++    if not compiler:
++        raise SystemExit('A host C++ compiler is required')
++    with tempfile.TemporaryDirectory(prefix='canvas-noise-test-') as temporary:
++        temporary = Path(temporary)
++        stub = temporary / 'base' / 'rand_util.h'
++        stub.parent.mkdir()
++        stub.write_text('''#pragma once
++#include <cstdint>
++namespace base { uint64_t RandGenerator(uint64_t range); }
++''')
++        source = temporary / 'noise_test.cc'
++        source.write_text('''#include <array>
++#include <cstddef>
++#include <cassert>
++#include <cstdint>
++#include <set>
++#include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_random.h"
++
++namespace {
++uint64_t next_sample;
++int calls;
++}
++
++namespace base {
++uint64_t RandGenerator(uint64_t range) {
++  assert(range == 81);
++  ++calls;
++  return next_sample;
++}
++}
++
++int main() {
++  std::set<std::array<int, 4>> combinations;
++  std::array<std::array<int, 3>, 4> counts{};
++  for (next_sample = 0; next_sample < 81; ++next_sample) {
++    const int before = calls;
++    const auto offsets = blink::GetCanvasFillRectNoise();
++    assert(calls == before + 1);
++    assert(combinations.insert(offsets).second);
++    for (std::size_t axis = 0; axis < offsets.size(); ++axis) {
++      assert(offsets[axis] >= -1 && offsets[axis] <= 1);
++      ++counts[axis][offsets[axis] + 1];
++    }
++  }
++  assert(combinations.size() == 81);
++  for (const auto& axis : counts)
++    for (int count : axis)
++      assert(count == 27);
++}
++''')
++        binary = temporary / 'noise_test'
++        subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
++                        '-I', str(temporary), '-I', str(root), str(source),
++                        '-o', str(binary)], check=True)
++        subprocess.run([str(binary)], check=True)
++    print('PASS: 81 unique combinations; uniform axes; one random call per draw')
++
++
++if __name__ == '__main__':
++    main()

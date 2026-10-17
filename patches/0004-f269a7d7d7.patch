@@ -1,0 +1,32 @@
+From f269a7d7d7f347af8b501aa551a593728237e12f Mon Sep 17 00:00:00 2001
+From: chenjinhu <chenjinhu@fumobi.com>
+Date: Fri, 16 Oct 2026 21:31:23 +0800
+Subject: [PATCH] Fix Window setter use counter compatibility
+
+
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index e9b01aa9df319b700a9226f9b94e9e4c7b58067b..0b6da381839d6663a206730e6eb91f74cccc0b35 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -36,7 +36,7 @@
+ ] interface Window : WindowProperties {
+     // the current browsing context
+     // FIXME: The spec uses the WindowProxy type for this and many other attributes.
+-    [Replaceable, CrossOrigin, CachedAccessor=kWindowProxy, Measure] readonly attribute Window window;
++    [Replaceable, CrossOrigin, CachedAccessor=kWindowProxy] readonly attribute Window window;
+     [Replaceable, CrossOrigin, CachedAccessor=kWindowProxy, Measure] readonly attribute Window self;
+     [Replaceable, CachedAccessor=kWindowDocument] readonly attribute Document document;
+     attribute DOMString name;
+diff --git a/webview_custom/README.md b/webview_custom/README.md
+index 68b76abb32e15199fcbe7096bbe092b29a7f71b9..ea18649f7af43fe13735b3a06e90accdea4089c9 100644
+--- a/webview_custom/README.md
++++ b/webview_custom/README.md
+@@ -7,7 +7,7 @@
+ 
+ ## WebView 修改
+ 
+-1. `Window.window`、`Window.document` 从 `LegacyUnforgeable` 改为 `Replaceable`，保留跨域限制与缓存属性。
++1. `Window.window`、`Window.document` 从 `LegacyUnforgeable` 改为 `Replaceable`，保留跨域限制与缓存属性。移除 `window` 的只读统计注解，避免新增 setter 引用不存在的统计枚举。
+ 2. 为 `Window.navigator` 补上 `Replaceable`，修复原包直接赋值 Proxy 的示例与只读 IDL 不一致的问题。
+ 3. `fillRect` 为 x、y、width、height 分别生成独立的 `[-1, 1]` 整数偏移。原包缺少随机函数头文件，经用户授权使用 Chromium `base::RandGenerator(81)` 一次均匀采样，拆成四个三进制位 补齐。
+ 4. 保留原始无效参数处理；零宽高不加噪，负尺寸先按上游逻辑归一化，扰动后的宽高下限为 0。
